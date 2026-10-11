@@ -460,6 +460,7 @@ pub fn select(player: &Arc<Player>, index: i32) {
 
 /// After a trade: offer uses, villager (and player) experience, and level.
 pub fn traded(server: &Arc<Server>, player: &Arc<Player>, index: usize, _xp: i32) {
+    super::advancements::grant(server, player, "adventure/trade");
     let Some(eid) = player.state.lock().unwrap().inv.window.as_ref().filter(|w| w.kind == WindowKind::Merchant).map(|w| w.station.merchant) else { return };
     let (leveled, data, pos, dim) = {
         let mut mobs = server.mobs.lock().unwrap();

@@ -52,6 +52,7 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
         MobKind::Chicken => matches!(item, "wheat_seeds" | "melon_seeds" | "pumpkin_seeds" | "beetroot_seeds" | "torchflower_seeds"),
         MobKind::Wolf => is_meat(item),
         MobKind::Cat | MobKind::Ocelot => matches!(item, "cod" | "salmon"),
+        MobKind::Bee => super::bees::is_flower(item),
         _ => false,
     }
 }
@@ -210,8 +211,19 @@ fn tamed_wolf(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], a
             if mobs::dist2(&bed, &m.pos) > 6.0 * 6.0 {
                 return Some((mobs::follow_path(world, m, bed), speed));
             }
-            // Close enough: it strolls around (the generic wander), coming back when it strays.
-            return None;
+            // Close enough: it strolls around the bed, never more than 4 blocks off.
+            if m.wander.is_none_or(|w| mobs::dist2(&w, &bed) > 4.5 * 4.5 || (w[0] - m.pos[0]).powi(2) + (w[2] - m.pos[2]).powi(2) < 1.0) {
+                m.wander = None;
+                if entities::random() < 0.02 {
+                    let a = entities::random() as f64 * std::f64::consts::TAU;
+                    let r = entities::random() as f64 * 4.0;
+                    m.wander = Some([bed[0] + a.cos() * r, bed[1], bed[2] + a.sin() * r]);
+                }
+            }
+            return Some(match m.wander {
+                Some(w) => (mobs::follow_path(world, m, w), speed * 0.6),
+                None => (m.pos, 0.0),
+            });
         }
     }
     let owner = seen.iter().find(|s| Some(s.player.uuid) == m.owner)?;
@@ -272,6 +284,7 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32,
     // inside the mobs' one).
     let mut out: Vec<(Vec<u8>, bool)> = Vec::new();
     let mut eat = false;
+    let mut tamed_now = false;
     let done = {
         let mut mobs_map = server.mobs.lock().unwrap();
         let Some(m) = mobs_map.get_mut(&eid).filter(|m| m.death_ticks.is_none()) else { return false };
@@ -282,6 +295,7 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32,
                 eat = true;
                 if entities::random() < 1.0 / 3.0 {
                     m.owner = Some(player.uuid);
+                    tamed_now = true;
                     m.sitting = true;
                     m.target = None;
                     m.health = m.max_health();
@@ -297,6 +311,7 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32,
                 eat = true;
                 if entities::random() < 1.0 / 3.0 {
                     m.owner = Some(player.uuid);
+                    tamed_now = true;
                     m.sitting = m.kind == MobKind::Cat;
                     out.push((status(m.eid, 7), true));
                 } else {
@@ -358,6 +373,9 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32,
     if eat {
         use_one(player);
     }
+    if tamed_now {
+        super::advancements::grant(server, player, "husbandry/tame_an_animal");
+    }
     for (p, _) in out {
         server.broadcast_tracked(eid, &p, true);
     }
@@ -386,8 +404,9 @@ pub fn breed(server: &Arc<Server>, dim: crate::world::Dimension, kind: MobKind, 
         m.owner = owner;
     }
     let player = by.and_then(|e| server.players.read().unwrap().get(&e).cloned());
-    if player.is_some() {
+    if let Some(p) = &player {
         entities::spawn_xp(server, dim, at, 1 + (entities::random() * 7.0) as i32);
+        super::advancements::grant(server, p, "husbandry/breed_an_animal");
     }
     let _ = player;
 }

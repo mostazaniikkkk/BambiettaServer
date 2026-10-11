@@ -199,6 +199,8 @@ fn be_id(block: &str) -> &str {
         "banner"
     } else if block == "spawner" {
         "mob_spawner"
+    } else if block == "bee_nest" {
+        "beehive"
     } else {
         block
     }
@@ -225,6 +227,7 @@ fn block_entity_to_nbt(pos: BlockPos, be: &BlockEntity, block: &str) -> Nbt {
             .with("Items", items(&b.items))
             .with("BrewTime", Nbt::Short(b.brew_time as i16))
             .with("Fuel", Nbt::Byte(b.fuel as i8)),
+        BlockEntity::Hive { bees } => base.with("Bees", Nbt::List(vec![])).with("bambietta_bees", Nbt::Int(*bees as i32)),
         BlockEntity::Spawner { delay, .. } => {
             let mut n = base.with("Delay", Nbt::Short(*delay as i16));
             if let Some(Nbt::Compound(fields)) = be.client_nbt() {
@@ -272,6 +275,7 @@ fn block_entity_from_nbt(n: &Nbt) -> Option<(BlockPos, BlockEntity)> {
         }),
         "sign" | "hanging_sign" => BlockEntity::Sign(Sign::from_nbt(n)),
         "banner" => BlockEntity::Banner(banner_from_nbt(Some(n))),
+        "beehive" => BlockEntity::Hive { bees: n.get_i64("bambietta_bees").unwrap_or(0) as u32 },
         "mob_spawner" => {
             let mob = n.get("SpawnData").and_then(|d| d.get("entity")).and_then(|e| e.get_str("id")).unwrap_or("minecraft:pig").trim_start_matches("minecraft:").to_string();
             BlockEntity::Spawner { mob, delay: n.get_i64("Delay").unwrap_or(20) as i32 }
@@ -401,6 +405,23 @@ pub struct LevelInfo {
     pub dragon_killed: bool,
     /// (raining, rainTime, thundering, thunderTime, clearWeatherTime).
     pub weather: (bool, i32, bool, i32, i32),
+    /// `GameRules` (name, value as text).
+    pub rules: Vec<(String, String)>,
+    /// World border, if saved.
+    pub border: Option<LevelBorder>,
+}
+
+/// World border in `level.dat` (vanilla's `Border*` keys).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LevelBorder {
+    pub center: [f64; 2],
+    pub size: f64,
+    pub target: f64,
+    pub lerp_ms: i64,
+    pub safe_zone: f64,
+    pub damage_per_block: f64,
+    pub warning_blocks: i32,
+    pub warning_time: i32,
 }
 
 pub fn read_level(dir: &Path) -> Option<LevelInfo> {
@@ -416,11 +437,32 @@ pub fn read_level(dir: &Path) -> Option<LevelInfo> {
     let dragon_killed = d.get("DragonFight").and_then(|f| f.get_i64("DragonKilled")).unwrap_or(0) != 0;
     let int = |k: &str| d.get_i64(k).unwrap_or(0);
     let weather = (int("raining") != 0, int("rainTime") as i32, int("thundering") != 0, int("thunderTime") as i32, int("clearWeatherTime") as i32);
-    Some(LevelInfo { spawn, time: d.get_i64("Time").unwrap_or(0), day_time: d.get_i64("DayTime").unwrap_or(1000), dragon_killed, weather })
+    let rules = match d.get("GameRules") {
+        Some(Nbt::Compound(fields)) => fields.iter().filter_map(|(k, v)| match v {
+            Nbt::String(s) => Some((k.clone(), s.clone())),
+            _ => None,
+        }).collect(),
+        _ => Vec::new(),
+    };
+    let f = |k: &str| match d.get(k) {
+        Some(Nbt::Double(v)) => Some(*v),
+        _ => None,
+    };
+    let border = f("BorderSize").map(|size| LevelBorder {
+        center: [f("BorderCenterX").unwrap_or(0.0), f("BorderCenterZ").unwrap_or(0.0)],
+        size,
+        target: f("BorderSizeLerpTarget").unwrap_or(size),
+        lerp_ms: d.get_i64("BorderSizeLerpTime").unwrap_or(0),
+        safe_zone: f("BorderSafeZone").unwrap_or(5.0),
+        damage_per_block: f("BorderDamagePerBlock").unwrap_or(0.2),
+        warning_blocks: f("BorderWarningBlocks").map_or(5, |v| v as i32),
+        warning_time: f("BorderWarningTime").map_or(15, |v| v as i32),
+    });
+    Some(LevelInfo { spawn, time: d.get_i64("Time").unwrap_or(0), day_time: d.get_i64("DayTime").unwrap_or(1000), dragon_killed, weather, rules, border })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn write_level(dir: &Path, name: &str, seed: i64, spawn: BlockPos, time: i64, day_time: i64, game_mode: u8, difficulty: u8, dragon: (bool, bool), weather: (bool, i32, bool, i32, i32)) -> Result<()> {
+pub fn write_level(dir: &Path, name: &str, seed: i64, spawn: BlockPos, time: i64, day_time: i64, game_mode: u8, difficulty: u8, dragon: (bool, bool), weather: (bool, i32, bool, i32, i32), rules: &[(String, String)], border: &LevelBorder) -> Result<()> {
     let dims = ["overworld", "the_nether", "the_end"]
         .iter()
         .map(|d| {
@@ -455,6 +497,16 @@ pub fn write_level(dir: &Path, name: &str, seed: i64, spawn: BlockPos, time: i64
         .with("thundering", Nbt::Byte(weather.2 as i8))
         .with("thunderTime", Nbt::Int(weather.3))
         .with("clearWeatherTime", Nbt::Int(weather.4))
+        .with("GameRules", Nbt::Compound(rules.iter().map(|(k, v)| (k.clone(), Nbt::str(v))).collect()))
+        .with("BorderCenterX", Nbt::Double(border.center[0]))
+        .with("BorderCenterZ", Nbt::Double(border.center[1]))
+        .with("BorderSize", Nbt::Double(border.size))
+        .with("BorderSizeLerpTarget", Nbt::Double(border.target))
+        .with("BorderSizeLerpTime", Nbt::Long(border.lerp_ms))
+        .with("BorderSafeZone", Nbt::Double(border.safe_zone))
+        .with("BorderDamagePerBlock", Nbt::Double(border.damage_per_block))
+        .with("BorderWarningBlocks", Nbt::Double(border.warning_blocks as f64))
+        .with("BorderWarningTime", Nbt::Double(border.warning_time as f64))
         .with("LastPlayed", Nbt::Long(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64))
         .with("DragonFight", Nbt::compound().with("DragonKilled", Nbt::Byte(dragon.0 as i8)).with("PreviouslyKilled", Nbt::Byte(dragon.1 as i8)).with("NeedsStateScanning", Nbt::Byte(0)))
         .with("DataPacks", Nbt::compound().with("Enabled", Nbt::List(vec![Nbt::str("vanilla")])).with("Disabled", Nbt::List(vec![])))
@@ -504,10 +556,12 @@ mod tests {
         // Rewriting the region preserves the other chunk.
         write_chunks(&dir, vec![((-31, 7), chunk_to_nbt(&back, -31, 7))]).unwrap();
         assert!(read_chunk(&dir, -30, 7).unwrap().is_some());
-        write_level(&dir, "Prueba", 42, BlockPos::new(1, 70, 2), 100, 6000, 0, 1, (true, true), (true, 5000, false, 9000, 0)).unwrap();
+        write_level(&dir, "Prueba", 42, BlockPos::new(1, 70, 2), 100, 6000, 0, 1, (true, true), (true, 5000, false, 9000, 0), &[("keepInventory".into(), "true".into())], &LevelBorder { center: [10.0, -5.0], size: 500.0, target: 500.0, lerp_ms: 0, safe_zone: 5.0, damage_per_block: 0.2, warning_blocks: 5, warning_time: 15 }).unwrap();
         let l = read_level(&dir).unwrap();
         assert_eq!((l.spawn, l.day_time), (Some(BlockPos::new(1, 70, 2)), 6000));
         assert_eq!(l.weather, (true, 5000, false, 9000, 0));
+        assert_eq!(l.rules, vec![("keepInventory".to_string(), "true".to_string())]);
+        assert_eq!(l.border.map(|b| (b.center, b.size)), Some(([10.0, -5.0], 500.0)));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

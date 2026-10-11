@@ -53,9 +53,10 @@ pub enum MobKind {
     Vindicator,
     Cat,
     Ocelot,
+    Bee,
 }
 
-pub const ALL: [MobKind; 28] = [
+pub const ALL: [MobKind; 29] = [
     MobKind::Cow,
     MobKind::Pig,
     MobKind::Sheep,
@@ -84,6 +85,7 @@ pub const ALL: [MobKind; 28] = [
     MobKind::Vindicator,
     MobKind::Cat,
     MobKind::Ocelot,
+    MobKind::Bee,
 ];
 
 impl MobKind {
@@ -117,6 +119,7 @@ impl MobKind {
             MobKind::Vindicator => "vindicator",
             MobKind::Cat => "cat",
             MobKind::Ocelot => "ocelot",
+            MobKind::Bee => "bee",
         }
     }
 
@@ -154,6 +157,7 @@ impl MobKind {
             MobKind::Vindicator => "Vindicador",
             MobKind::Cat => "Gato",
             MobKind::Ocelot => "Ocelote",
+            MobKind::Bee => "Abeja",
         }
     }
 
@@ -206,6 +210,7 @@ impl MobKind {
             MobKind::Endermite => (0.4, 0.3),
             MobKind::Wolf => (0.6, 0.85),
             MobKind::Cat | MobKind::Ocelot => (0.6, 0.7),
+            MobKind::Bee => (0.7, 0.6),
             MobKind::Silverfish => (0.4, 0.3),
             MobKind::CaveSpider => (0.7, 0.5),
             MobKind::EnderDragon => (16.0, 8.0),
@@ -262,7 +267,7 @@ impl MobKind {
 
     /// No gravity.
     fn flies(self) -> bool {
-        matches!(self, MobKind::Blaze | MobKind::Ghast | MobKind::EnderDragon | MobKind::EndCrystal)
+        matches!(self, MobKind::Blaze | MobKind::Ghast | MobKind::EnderDragon | MobKind::EndCrystal | MobKind::Bee)
     }
 
     /// Living entity (the End crystal isn't one: its metadata is different).
@@ -276,7 +281,8 @@ impl MobKind {
 
     fn ambient(self) -> Option<String> {
         match self {
-            MobKind::Creeper | MobKind::MagmaCube | MobKind::EndCrystal => None,
+            // (The bee's buzz is a sound the client plays on its own.)
+            MobKind::Creeper | MobKind::MagmaCube | MobKind::EndCrystal | MobKind::Bee => None,
             k => Some(format!("entity.{}.ambient", k.name())),
         }
     }
@@ -367,6 +373,13 @@ pub struct Mob {
     /// Vindicator: the door of the building it is going to search, ticks left searching it,
     /// and the spot inside it searches around.
     pub raid_door: Option<BlockPos>,
+    /// Bee: its hive, the flower it is heading to, whether it carries nectar, ticks spent on
+    /// the flower, and ticks since it stung (0: never).
+    pub hive: Option<BlockPos>,
+    pub flower: Option<BlockPos>,
+    pub nectar: bool,
+    pub pollinate: u32,
+    pub stung: u32,
     pub explore: u32,
     pub anchor: Option<[f64; 3]>,
     pub approach: f64,
@@ -532,6 +545,11 @@ pub fn metadata(m: &Mob) -> Vec<u8> {
                 }
             }
         }
+        MobKind::Bee => {
+            // 17: angry / has stung / has nectar; 18: anger ticks.
+            p.u8(17).varint(0).i8(if m.angry > 0 { 0x02 } else { 0 } | if m.stung > 0 { 0x04 } else { 0 } | if m.nectar { 0x08 } else { 0 });
+            p.u8(18).varint(1).varint(m.angry as i32);
+        }
         MobKind::Ocelot => {
             // 17: trusting.
             p.u8(17).varint(8).bool(m.owner.is_some());
@@ -635,6 +653,11 @@ pub fn spawn(server: &Server, dim: Dimension, kind: MobKind, pos: [f64; 3]) -> i
         charged: false,
         last_target: None,
         raid_door: None,
+        hive: None,
+        flower: None,
+        nectar: false,
+        pollinate: 0,
+        stung: 0,
         explore: 0,
         anchor: None,
         approach: 0.0,
@@ -826,6 +849,8 @@ pub enum Action {
     HurtMob(i32, f32, i32),
     /// A packet for everyone in a dimension (door cracks, level events...).
     DimPacket(Dimension, Vec<u8>),
+    /// A bee goes into its hive: (bee, dimension, hive, with nectar).
+    EnterHive(i32, Dimension, BlockPos, bool),
 }
 
 pub fn difficulty_damage(server: &Server, base: f32) -> f32 {
@@ -901,11 +926,14 @@ pub fn tick(server: &Arc<Server>, age: i64) {
     if age % 20 == 0 {
         natural_spawn(server, &seen, age);
     }
-    if age % 1200 == 600 {
+    if age % 1200 == 600 && server.rule("doPatrolSpawning") && server.rule("doMobSpawning") {
         super::pillagers::natural_patrols(server, &seen);
     }
     if age % 100 == 50 {
         super::pillagers::outpost_garrison(server, &seen);
+    }
+    if age % 20 == 10 {
+        super::bees::tick_hives(server, is_day(server));
     }
     if age % 20 == 0 {
         super::doors::decay(server, age);
@@ -961,7 +989,7 @@ pub fn tick(server: &Arc<Server>, age: i64) {
                 if nearest > 160.0 * 160.0 && m.kind != MobKind::EnderDragon {
                     continue; // too far: frozen
                 }
-                let look = |m: &Mob| (m.target.is_some(), m.fire > 0, m.fuse.is_some(), m.angry > 0, m.burst > 0, m.charging, m.dragon.as_ref().map(|d| d.phase), m.charging());
+                let look = |m: &Mob| (m.target.is_some(), m.fire > 0, m.fuse.is_some(), m.angry > 0, m.burst > 0, m.charging, m.dragon.as_ref().map(|d| d.phase), m.charging(), m.nectar, m.stung > 0);
                 let before = look(m);
                 let health_before = m.health;
                 if m.kind == MobKind::EnderDragon {
@@ -1027,6 +1055,10 @@ pub fn run_actions(server: &Arc<Server>, actions: Vec<Action>) {
             Action::Breed(dim, kind, at, parents, by, owner) => super::animals::breed(server, dim, kind, at, parents, by, owner),
             Action::HurtMob(target, amount, by) => hurt(server, target, amount, "mob_attack", Some(by), None, 0),
             Action::DimPacket(dim, p) => server.broadcast_dim(dim, &p, None),
+            Action::EnterHive(eid, dim, hive, nectar) => {
+                remove(server, eid);
+                super::bees::enter(server, dim, hive, nectar);
+            }
             Action::Explode(dim, pos, power, by, fire) => explosion::explode_ex(server, dim, pos, power, Some(by), fire),
             Action::Shoot(dim, kind, shooter, from, vel) => {
                 let crossbow = kind == ProjectileKind::Arrow && kind_of(server, shooter) == Some(MobKind::Pillager);
@@ -1251,6 +1283,15 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
     } else {
         None
     };
+    // Bees fly on their own (flowers, hive, stings).
+    if kind == MobKind::Bee {
+        if m.angry > 0 && m.target.is_none() {
+            m.angry = 0;
+        }
+        let rain = server.weather.lock().unwrap().is_raining();
+        super::bees::ai(world, m, seen, day, rain, server, actions);
+        return;
+    }
     // A patrol fights together: whoever spots the player warns the others.
     let target = if matches!(kind, MobKind::Pillager | MobKind::Vindicator) { target.or_else(|| super::pillagers::shared_target(m, group, seen)) } else { target };
     m.target = target.map(|t| t.player.eid);
@@ -1667,7 +1708,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
     }
 
     // A zombie or a vindicator with a closed wooden door in its way breaks it.
-    if matches!(kind, MobKind::Zombie | MobKind::Vindicator) && goal.is_some() {
+    if matches!(kind, MobKind::Zombie | MobKind::Vindicator) && goal.is_some() && server.rule("mobGriefing") {
         if let Some(door) = super::doors::in_the_way(world, m) {
             let age = server.age.load(Ordering::Relaxed);
             super::doors::hit(server, world, m, door, age, actions);
@@ -1990,8 +2031,9 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
         }
         m.fall = 0.0;
     } else if wet || (lava && m.kind == MobKind::Strider) {
-        // They float towards the surface (the strider, in lava).
-        m.vel[1] = (m.vel[1] + 0.04).min(0.1);
+        // They float towards the surface (the strider, in lava). A jump out at the bank keeps
+        // its push (it only fades) instead of being capped to the floating speed.
+        m.vel[1] = if m.vel[1] > 0.1 { m.vel[1] - 0.02 } else { (m.vel[1] + 0.04).min(0.1) };
         m.fall = 0.0;
     } else if lava {
         m.vel[1] = (m.vel[1] - 0.02).max(-0.1);
@@ -2000,7 +2042,26 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
         m.vel[1] -= 0.08;
     }
     let want = m.vel;
-    let d = move_aabb(world, &m.aabb(), m.vel);
+    let start = m.aabb();
+    let mut d = move_aabb(world, &start, m.vel);
+    // Step up like vanilla (0.6 blocks: slabs, a bank just above the water...) when that
+    // lets it go further than bumping into the obstacle.
+    let bumped = (d[0] - want[0]).abs() > 1e-6 || (d[2] - want[2]).abs() > 1e-6;
+    let touching_water = wet || block_name(world, m.pos, 0.0) == "water";
+    // Getting out of the water (in it, or just above it): a bigger step, enough for a bank one
+    // block above the surface.
+    let leaving_water = touching_water || block_name(world, m.pos, -0.6) == "water";
+    if bumped && !m.kind.flies() && (m.on_ground || leaving_water) {
+        let step = if leaving_water { 1.1 } else { 0.6 };
+        let up = move_aabb(world, &start, [0.0, step, 0.0]);
+        let raised = start.offset(up);
+        let h = move_aabb(world, &raised, [want[0], 0.0, want[2]]);
+        if h[0].hypot(h[2]) > d[0].hypot(d[2]) + 1e-3 {
+            let moved = raised.offset(h);
+            let down = move_aabb(world, &moved, [0.0, -up[1], 0.0]);
+            d = [h[0], up[1] + down[1], h[2]];
+        }
+    }
     for i in 0..3 {
         m.pos[i] += d[i];
     }
@@ -2032,7 +2093,9 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
     // jumped: without this check the mob would hop against it forever, so it goes around it.
     // In the water, bumping into the bank pushes it up and out (like vanilla).
     if blocked && !m.kind.flies() {
-        if wet {
+        // Still in the water against the bank: pushed up every tick (like vanilla) until it can
+        // step out.
+        if touching_water {
             m.vel[1] = 0.3;
         } else if matches!(m.kind, MobKind::Spider | MobKind::CaveSpider | MobKind::Cat | MobKind::Ocelot) {
             m.vel[1] = 0.2;
@@ -2225,12 +2288,12 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
                 m.fire = m.fire.max(1);
             }
             match m.kind {
-                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf | MobKind::Spider | MobKind::CaveSpider | MobKind::Vindicator => {
+                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf | MobKind::Spider | MobKind::CaveSpider | MobKind::Vindicator | MobKind::Bee => {
                     // A tamed wolf does not turn on anyone; a wild one calls its pack.
                     if let Some(p) = by_player.filter(|_| m.owner.is_none()) {
                         m.angry = 400 + (entities::random() * 400.0) as u32;
                         m.target = Some(p);
-                        if matches!(m.kind, MobKind::ZombifiedPiglin | MobKind::Wolf) {
+                        if matches!(m.kind, MobKind::ZombifiedPiglin | MobKind::Wolf | MobKind::Bee) {
                             alert = Some((m.dim, m.pos, p));
                         }
                     }
@@ -2332,6 +2395,12 @@ fn on_death(server: &Arc<Server>, m: &Mob, killer: Option<i32>) {
         // There are no frogs: only magma cream, and only from large cubes.
         let cream = data::get().item_id("magma_cream");
         drops.retain(|d| Some(d.0) == cream && m.size > 1);
+    }
+    if let Some(p) = &player {
+        super::advancements::grant(server, p, "adventure/root");
+        if m.kind.hostile() {
+            super::advancements::grant(server, p, "adventure/kill_a_mob");
+        }
     }
     // The patrol captain drops its banner and whoever killed it gets Bad Omen; the crossbow
     // sometimes.
@@ -2494,24 +2563,51 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32)
 // ---------- natural spawning ----------
 
 /// Ground (solid block with `room` air above it) below `y` in column (x, z).
-fn spawn_spot(world: &mut World, x: i32, z: i32, from_y: i32, room: i32) -> Option<[f64; 3]> {
+/// The first spot from `from_y` downwards (at most `depth` blocks) where a mob `room` blocks
+/// tall can spawn (its feet at the returned height).
+fn spawn_spot_below(world: &mut World, x: i32, z: i32, from_y: i32, room: i32, depth: i32) -> Option<[f64; 3]> {
+    (from_y - depth..=from_y).rev().find(|&y| spawnable(world, x, y - 1, z, room)).map(|y| [x as f64 + 0.5, y as f64, z as f64 + 0.5])
+}
+
+/// Whether a light source (torch, lava, glowstone...) lights this spot at all (monsters need
+/// block light 0, like vanilla): its light minus the distance (approximately, ignoring walls).
+fn block_lit(world: &mut World, p: [f64; 3]) -> bool {
     let reg = data::get();
-    let g = gameplay::get();
-    let dim = world.dim;
-    for y in (from_y - 24..from_y + 16).rev() {
-        if !dim.in_bounds(y) || !dim.in_bounds(y + room) {
-            continue;
-        }
-        let floor = world.get_block(BlockPos::new(x, y, z));
-        let fb = reg.block_of_state(floor);
-        let solid = g.shape(floor).len() == 1 && g.shape(floor)[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] && !fb.name.ends_with("leaves") && !fb.name.contains("glass") && fb.name != "bedrock";
-        // Room above: nothing to bump into (grass and flowers are fine) and no liquid.
-        let free = |s: u16| g.shape(s).is_empty() && !matches!(reg.block_of_state(s).name.as_str(), "water" | "lava" | "fire" | "sweet_berry_bush" | "powder_snow");
-        if solid && (1..=room).all(|dy| free(world.get_block(BlockPos::new(x, y + dy, z)))) {
-            return Some([x as f64 + 0.5, (y + 1) as f64, z as f64 + 0.5]);
+    let c = cell(p);
+    for dx in -8..=8i32 {
+        for dy in -6..=6i32 {
+            for dz in -8..=8i32 {
+                let d = dx.abs() + dy.abs() + dz.abs();
+                if d > 14 {
+                    continue;
+                }
+                if reg.light(world.get_block(BlockPos::new(c.x + dx, c.y + dy, c.z + dz))).1 as i32 > d {
+                    return true;
+                }
+            }
         }
     }
-    None
+    false
+}
+
+fn spawn_spot(world: &mut World, x: i32, z: i32, from_y: i32, room: i32) -> Option<[f64; 3]> {
+    (from_y - 24..from_y + 16).rev().find(|&y| spawnable(world, x, y, z, room)).map(|y| [x as f64 + 0.5, (y + 1) as f64, z as f64 + 0.5])
+}
+
+/// Can a mob `room` blocks tall spawn standing on the block at (x, y, z)? A full solid floor
+/// (not leaves, glass or bedrock) and room above with nothing to bump into (grass and flowers
+/// are fine) and no liquid.
+fn spawnable(world: &mut World, x: i32, y: i32, z: i32, room: i32) -> bool {
+    let reg = data::get();
+    let g = gameplay::get();
+    if !world.dim.in_bounds(y) || !world.dim.in_bounds(y + room) {
+        return false;
+    }
+    let floor = world.get_block(BlockPos::new(x, y, z));
+    let fb = reg.block_of_state(floor);
+    let solid = g.shape(floor).len() == 1 && g.shape(floor)[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] && !fb.name.ends_with("leaves") && !fb.name.contains("glass") && fb.name != "bedrock";
+    let free = |s: u16| g.shape(s).is_empty() && !matches!(reg.block_of_state(s).name.as_str(), "water" | "lava" | "fire" | "sweet_berry_bush" | "powder_snow");
+    solid && (1..=room).all(|dy| free(world.get_block(BlockPos::new(x, y + dy, z))))
 }
 
 /// Lava surface with air above (for striders).
@@ -2545,6 +2641,9 @@ fn pick<T: Copy>(table: &[(T, u32)]) -> T {
 }
 
 fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
+    if !server.rule("doMobSpawning") {
+        return;
+    }
     // Thunderstorms darken the sky enough for monsters to spawn.
     let night = !is_day(server) || server.weather.lock().unwrap().is_thundering();
     let counts: Vec<(usize, usize)> = {
@@ -2568,11 +2667,30 @@ fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
             Dimension::Overworld => {
                 let Some(spot) = spawn_spot(&mut world, x, z, s.pos[1] as i32, 2) else { continue };
                 let below = data::get().block_of_state(world.get_block(BlockPos::new(x, spot[1] as i32 - 1, z))).name.clone();
-                // Monsters: at night, under open sky.
-                if monsters && night && hostile < HOSTILE_CAP && sky_exposed(&mut world, spot) {
+                // Monsters: wherever it is dark, at any height around the player: under the
+                // open sky at night (or in a storm), and anywhere out of the sky's reach (caves,
+                // buildings) with no light source nearby. A few tries per player and second.
+                let mut room = HOSTILE_CAP.saturating_sub(hostile);
+                for _ in 0..4 {
+                    if !monsters || room == 0 {
+                        break;
+                    }
+                    let a = entities::random() as f64 * std::f64::consts::TAU;
+                    let r = 24.0 + entities::random() as f64 * 40.0;
+                    let (mx, mz) = ((s.pos[0] + a.cos() * r).floor() as i32, (s.pos[2] + a.sin() * r).floor() as i32);
+                    if !world.is_loaded(mx >> 4, mz >> 4) {
+                        continue;
+                    }
+                    let y0 = s.pos[1] as i32 - 24 + (entities::random() * 40.0) as i32;
+                    let Some(at) = spawn_spot_below(&mut world, mx, mz, y0, 2, 20) else { continue };
+                    let ok = if sky_exposed(&mut world, at) { night } else { !block_lit(&mut world, at) };
+                    if !ok {
+                        continue;
+                    }
                     let kind = pick(&[(MobKind::Zombie, 95), (MobKind::Skeleton, 100), (MobKind::Creeper, 100), (MobKind::Spider, 100), (MobKind::Enderman, 10)]);
-                    if kind != MobKind::Enderman || spawn_spot(&mut world, x, z, spot[1] as i32, 3).is_some() {
-                        to_spawn.push((s.dim, kind, spot));
+                    if kind != MobKind::Enderman || spawn_spot_below(&mut world, mx, mz, at[1] as i32, 3, 0).is_some() {
+                        to_spawn.push((s.dim, kind, at));
+                        room -= 1;
                     }
                 }
                 // Animals: on grass, every so often, in small groups.

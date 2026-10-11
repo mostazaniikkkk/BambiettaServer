@@ -141,6 +141,10 @@ fn rand(n: i32) -> i32 {
 }
 
 pub fn tick(server: &Arc<Server>, age: i64) {
+    // doFireTick off: fire neither spreads nor burns out.
+    if !server.rule("doFireTick") {
+        return;
+    }
     let due: Vec<(Dimension, BlockPos)> = {
         let mut f = server.fire.lock().unwrap();
         if age % 200 == 0 && !f.queue.is_empty() {

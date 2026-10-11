@@ -267,6 +267,9 @@ fn exit_portal(world: &mut World, lit: bool) -> Vec<(BlockPos, u16)> {
 
 /// The dragon finished dying: exit portal, egg (the first time) and end of the fight.
 pub fn died(server: &Arc<Server>, m: &Mob) {
+    for p in server.online().iter().filter(|p| p.dim() == Dimension::End) {
+        super::advancements::grant(server, p, "end/kill_dragon");
+    }
     let mut d = packet(id::play::ENTITY_DESTROY);
     d.varint(1).varint(m.eid);
     server.broadcast_tracked(m.eid, &d, true);

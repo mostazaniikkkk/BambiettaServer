@@ -31,6 +31,8 @@ pub async fn run(server: Arc<Server>, mut conn: Conn, login: Login) -> Result<()
         uuid: login.uuid,
         name: login.name,
         transport: conn.transport,
+        peer: conn.peer,
+        properties: login.properties,
         tx: conn.tx.clone(),
         closed: Notify::new(),
         state: Mutex::new(state),
@@ -160,6 +162,8 @@ async fn join(server: &Arc<Server>, player: &Arc<Player>) -> bool {
     }
     super::effects::resend(player);
     super::weather::send_state(server, player);
+    super::border::send_state(server, player);
+    super::advancements::send_all(player);
     server.broadcast_message(&format!("§e{} entró al juego", player.name));
     player.message("§dBienvenido a Bambietta§7 · usa §e/help");
     true
@@ -903,7 +907,8 @@ fn player_info_add(players: &[Arc<Player>]) -> Vec<u8> {
     p.u8(0x01 | 0x04 | 0x08 | 0x10).varint(players.len() as i32);
     for pl in players {
         let s = pl.state.lock().unwrap();
-        p.uuid(pl.uuid).string(&pl.name).varint(0);
+        p.uuid(pl.uuid).string(&pl.name);
+        super::session::write_properties(&mut p, &pl.properties);
         p.varint(s.game_mode as i32).bool(true).varint(s.ping);
     }
     p

@@ -1,4 +1,5 @@
-//! Handshake, status (server list), offline login and the configuration phase.
+//! Handshake, status (server list), login (offline, or online through `auth`) and the
+//! configuration phase.
 
 use super::{offline_uuid, Server};
 use crate::data::REGISTRY_CODEC;
@@ -76,6 +77,7 @@ async fn status(server: &Server, mut conn: Conn) -> Result<()> {
 pub struct Login {
     pub name: String,
     pub uuid: u128,
+    pub properties: Vec<super::auth::Property>,
     pub view_distance: i32,
 }
 
@@ -92,7 +94,7 @@ async fn login(server: &Server, conn: &mut Conn, protocol: i32) -> Result<Option
     if r.varint()? != id::login::LOGIN_START {
         bail!("se esperaba login_start");
     }
-    let name = r.string(16)?;
+    let mut name = r.string(16)?;
     if protocol != PROTOCOL_VERSION {
         login_disconnect(conn, &format!("§cEste servidor usa Minecraft {VERSION_NAME} (protocolo {PROTOCOL_VERSION})"));
         info!("{name} rechazado: protocolo {protocol} ({})", conn.peer);
@@ -100,6 +102,37 @@ async fn login(server: &Server, conn: &mut Conn, protocol: i32) -> Result<Option
     }
     if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
         login_disconnect(conn, "§cNombre de usuario inválido");
+        return Ok(None);
+    }
+    // Online mode: encryption and the Mojang account.
+    let mut uuid = offline_uuid(&name);
+    let mut properties = Vec::new();
+    if server.config.online_mode && (conn.transport == "tcp" || server.config.online_mode_ws) {
+        match super::auth::authenticate(conn, &name).await {
+            Ok(Some(profile)) => {
+                name = profile.name;
+                uuid = profile.uuid;
+                properties = profile.properties;
+            }
+            Ok(None) => {
+                info!("{name} rechazado ({}): Mojang no confirma la sesión", conn.peer);
+                login_disconnect(conn, "§cNo se pudo verificar tu cuenta de Minecraft.
+§7Inicia sesión en el launcher oficial y vuelve a intentarlo.");
+                return Ok(None);
+            }
+            Err(e) => {
+                info!("{name}: falló la autenticación ({}): {e:#}", conn.peer);
+                login_disconnect(conn, "§cNo se pudo verificar tu cuenta con los servidores de Mojang.
+§7Inténtalo de nuevo en un momento.");
+                return Ok(None);
+            }
+        }
+    }
+    // Bans and whitelist.
+    let refused = server.admin.lock().unwrap().refuse(&name, &super::format_uuid(uuid), &conn.peer.ip().to_string());
+    if let Some(reason) = refused {
+        info!("{name} rechazado ({}): {}", conn.peer, reason.replace('\n', " "));
+        login_disconnect(conn, &reason);
         return Ok(None);
     }
     if server.find_player(&name).is_some() {
@@ -123,9 +156,9 @@ async fn login(server: &Server, conn: &mut Conn, protocol: i32) -> Result<Option
         conn.reader.compression = Some(threshold);
     }
 
-    let uuid = offline_uuid(&name);
     let mut p = packet(id::login::SUCCESS);
-    p.uuid(uuid).string(&name).varint(0);
+    p.uuid(uuid).string(&name);
+    write_properties(&mut p, &properties);
     conn.send(p);
 
     // Wait for login_acknowledged (plugin responses are ignored).
@@ -164,5 +197,21 @@ async fn login(server: &Server, conn: &mut Conn, protocol: i32) -> Result<Option
             other => debug!("{name}: paquete de configuración 0x{other:02x} ignorado"),
         }
     }
-    Ok(Some(Login { name, uuid, view_distance }))
+    Ok(Some(Login { name, uuid, properties, view_distance }))
+}
+
+/// Profile properties as in login_success and player_info.
+pub fn write_properties(p: &mut Vec<u8>, properties: &[super::auth::Property]) {
+    p.varint(properties.len() as i32);
+    for prop in properties {
+        p.string(&prop.name).string(&prop.value);
+        match &prop.signature {
+            Some(s) => {
+                p.bool(true).string(s);
+            }
+            None => {
+                p.bool(false);
+            }
+        }
+    }
 }

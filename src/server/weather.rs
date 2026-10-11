@@ -154,7 +154,9 @@ pub fn tick(server: &Arc<Server>, age: i64) {
     let (events, thunder) = {
         let mut w = server.weather.lock().unwrap();
         let was_raining = w.is_raining();
-        if w.clear_time > 0 {
+        if !server.rule("doWeatherCycle") {
+            // Frozen weather: the timers do not run.
+        } else if w.clear_time > 0 {
             w.clear_time -= 1;
             w.raining = false;
             w.thundering = false;

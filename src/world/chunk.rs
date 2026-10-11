@@ -265,6 +265,23 @@ impl Chunk {
     }
 
     /// Local coordinates: x,z in 0..16, absolute y.
+    /// Every non-air block as ((x, y, z), state), skipping all-air sections.
+    pub fn iter_states(&self) -> Vec<((usize, i32, usize), u16)> {
+        let mut out = Vec::new();
+        for (i, s) in self.sections.iter().enumerate() {
+            if s.blocks.uniform() == Some(0) {
+                continue;
+            }
+            for r in 0..4096 {
+                let st = s.blocks.get(r);
+                if st != 0 {
+                    out.push(((r & 15, self.min_y + i as i32 * 16 + (r >> 8) as i32, (r >> 4) & 15), st));
+                }
+            }
+        }
+        out
+    }
+
     /// Random ticks: `n` random blocks per section, keeping those `wanted` as (x, y, z, state)
     /// (sections with nothing wanted in their palette are skipped).
     pub fn random_blocks(&self, n: usize, wanted: &dyn Fn(u16) -> bool, rnd: &mut dyn FnMut() -> u32, out: &mut Vec<(usize, i32, usize, u16)>) {

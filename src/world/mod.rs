@@ -398,6 +398,27 @@ impl World {
             .collect()
     }
 
+    /// Hives of a loaded chunk: (position, bees inside).
+    pub fn hives_in(&self, cx: i32, cz: i32) -> Vec<(BlockPos, u32)> {
+        let Some(c) = self.chunks.get(&(cx, cz)) else { return vec![] };
+        c.block_entities
+            .iter()
+            .filter_map(|(p, be)| match be {
+                blockentity::BlockEntity::Hive { bees } => Some((*p, *bees)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn set_hive_bees(&mut self, p: BlockPos, n: u32) {
+        if let Some(c) = self.chunks.get_mut(&(p.x >> 4, p.z >> 4)) {
+            if let Some(blockentity::BlockEntity::Hive { bees }) = c.block_entities.get_mut(&p) {
+                *bees = n;
+                c.dirty = true;
+            }
+        }
+    }
+
     /// Counts a spawner down (not saved as a change: it is just a timer).
     pub fn set_spawner_delay(&mut self, p: BlockPos, d: i32) {
         if let Some(c) = self.chunks.get_mut(&(p.x >> 4, p.z >> 4)) {

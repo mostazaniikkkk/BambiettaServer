@@ -61,8 +61,51 @@ pub enum Out {
     Packet(Vec<u8>),
     /// Enables compression for subsequent packets.
     Compression(i32),
+    /// Encrypts everything sent from now on (AES-128/CFB8 with this shared secret).
+    Encrypt([u8; 16]),
     /// Closes the connection after flushing what is pending.
     Close,
+}
+
+/// AES-128 in CFB8 mode, the protocol's encryption once the login is authenticated (the
+/// shared secret is both the key and the initial vector). One direction per instance.
+pub struct Cfb8 {
+    aes: aes::Aes128,
+    iv: [u8; 16],
+}
+
+impl Cfb8 {
+    pub fn new(secret: [u8; 16]) -> Self {
+        use aes::cipher::KeyInit;
+        Self { aes: aes::Aes128::new(&secret.into()), iv: secret }
+    }
+
+    fn keystream(&self) -> u8 {
+        use aes::cipher::BlockEncrypt;
+        let mut block = self.iv.into();
+        self.aes.encrypt_block(&mut block);
+        block[0]
+    }
+
+    fn shift(&mut self, c: u8) {
+        self.iv.copy_within(1.., 0);
+        self.iv[15] = c;
+    }
+
+    pub fn encrypt(&mut self, data: &mut [u8]) {
+        for b in data {
+            *b ^= self.keystream();
+            self.shift(*b);
+        }
+    }
+
+    pub fn decrypt(&mut self, data: &mut [u8]) {
+        for b in data {
+            let c = *b;
+            *b ^= self.keystream();
+            self.shift(c);
+        }
+    }
 }
 
 pub type Tx = mpsc::UnboundedSender<Out>;
@@ -79,7 +122,7 @@ impl Conn {
     pub fn new(raw_in: RawIn, raw_out: RawOut, peer: SocketAddr, transport: &'static str) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
         tokio::spawn(write_loop(raw_out, rx));
-        let reader = PacketReader { raw: raw_in, buf: BytesMut::with_capacity(4096), compression: None, max_per_second: 0, window: (std::time::Instant::now(), 0) };
+        let reader = PacketReader { raw: raw_in, buf: BytesMut::with_capacity(4096), compression: None, cipher: None, max_per_second: 0, window: (std::time::Instant::now(), 0) };
         Self { reader, tx, peer, transport }
     }
 
@@ -92,14 +135,31 @@ pub struct PacketReader {
     raw: RawIn,
     buf: BytesMut,
     pub compression: Option<i32>,
+    cipher: Option<Cfb8>,
     /// Allowed packets per second (0 = unlimited).
     pub max_per_second: u32,
     window: (std::time::Instant, u32),
 }
 
 impl PacketReader {
+    /// Decrypts everything received from now on, including what is already buffered.
+    pub fn decrypt(&mut self, secret: [u8; 16]) {
+        let mut c = Cfb8::new(secret);
+        c.decrypt(&mut self.buf);
+        self.cipher = Some(c);
+    }
+
     /// Reads more bytes from the transport. Returns `false` if the connection ended.
     async fn fill(&mut self) -> Result<bool> {
+        let start = self.buf.len();
+        let more = self.fill_raw().await?;
+        if let Some(c) = &mut self.cipher {
+            c.decrypt(&mut self.buf[start..]);
+        }
+        Ok(more)
+    }
+
+    async fn fill_raw(&mut self) -> Result<bool> {
         match &mut self.raw {
             RawIn::Tcp(s) => Ok(s.read_buf(&mut self.buf).await? > 0),
             RawIn::Ws(s) => loop {
@@ -185,8 +245,17 @@ fn frame(body: &[u8], threshold: Option<i32>, out: &mut Vec<u8>) {
     }
 }
 
+async fn send(raw: &mut RawOut, batch: Vec<u8>) -> Result<()> {
+    match raw {
+        RawOut::Tcp(s) if !batch.is_empty() => Ok(s.write_all(&batch).await?),
+        RawOut::Ws(s) if !batch.is_empty() => Ok(s.send(Message::Binary(batch)).await?),
+        _ => Ok(()),
+    }
+}
+
 async fn write_loop(mut raw: RawOut, mut rx: mpsc::UnboundedReceiver<Out>) {
     let mut threshold = None;
+    let mut cipher: Option<Cfb8> = None;
     let mut closing = false;
     while let Some(first) = rx.recv().await {
         // Batch everything already queued to reduce messages/syscalls.
@@ -196,6 +265,17 @@ async fn write_loop(mut raw: RawOut, mut rx: mpsc::UnboundedReceiver<Out>) {
             match msg {
                 Out::Packet(body) => frame(&body, threshold, &mut batch),
                 Out::Compression(t) => threshold = Some(t),
+                Out::Encrypt(secret) => {
+                    // What is already batched goes out in clear, the rest encrypted.
+                    if let Some(c) = &mut cipher {
+                        c.encrypt(&mut batch);
+                    }
+                    if !batch.is_empty() && send(&mut raw, std::mem::take(&mut batch)).await.is_err() {
+                        closing = true;
+                        break;
+                    }
+                    cipher = Some(Cfb8::new(secret));
+                }
                 Out::Close => {
                     closing = true;
                     break;
@@ -205,11 +285,10 @@ async fn write_loop(mut raw: RawOut, mut rx: mpsc::UnboundedReceiver<Out>) {
                 next = rx.try_recv().ok();
             }
         }
-        let res = match &mut raw {
-            RawOut::Tcp(s) if !batch.is_empty() => s.write_all(&batch).await.map_err(anyhow::Error::from),
-            RawOut::Ws(s) if !batch.is_empty() => s.send(Message::Binary(batch)).await.map_err(anyhow::Error::from),
-            _ => Ok(()),
-        };
+        if let Some(c) = &mut cipher {
+            c.encrypt(&mut batch);
+        }
+        let res = send(&mut raw, batch).await;
         if res.is_err() || closing {
             break;
         }

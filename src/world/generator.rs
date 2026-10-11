@@ -800,6 +800,14 @@ impl Overworld {
             }
         }
 
+        // Bee nests from the trees come with three bees inside.
+        if let Some(nest) = data::get().block("bee_nest") {
+            for (pos, s) in c.iter_states() {
+                if s >= nest.min_state && s <= nest.max_state {
+                    c.block_entities.insert(crate::protocol::BlockPos::new(x0 + pos.0 as i32, pos.1, z0 + pos.2 as i32), super::blockentity::BlockEntity::Hive { bees: 3 });
+                }
+            }
+        }
         // 5. Villages.
         for v in self.villages_near(cx, cz) {
             for &(bx, by, bz, s) in v.iter() {
@@ -1021,6 +1029,10 @@ impl Overworld {
                 out.extend([(x, top + 1, z, leaf), (x + 1, top + 1, z, leaf), (x - 1, top + 1, z, leaf), (x, top + 1, z + 1, leaf), (x, top + 1, z - 1, leaf)]);
                 for ly in y..=top {
                     out.push((x, ly, z, log));
+                }
+                // Now and then a bee nest on the trunk, under the leaves.
+                if t.kind != TreeKind::SwampOak && (r >> 40) % 25 == 0 {
+                    out.push((x, top - 3, z - 1, with("bee_nest", &[("facing", "north")])));
                 }
                 if t.kind == TreeKind::SwampOak {
                     // Vines hanging from the leaves.

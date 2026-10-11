@@ -11,6 +11,11 @@ bytes = "1"
 flate2 = "1"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 md-5 = "0.10"
+rand = "0.8"
+rsa = "0.9"
+aes = "0.8"
+sha1 = "0.10"
+webpki-roots = "0.26"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 rustls-pemfile = "2"
 serde = { version = "1", features = ["derive"] }

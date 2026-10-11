@@ -5,7 +5,9 @@
 //!   pumpkin and melon stems (and their fruit), saplings into trees, sugar cane, cactus,
 //!   sweet berry bushes and nether wart;
 //! - bone meal speeds up crops and saplings and sprouts grass and flowers;
-//! - plants can only be placed where they can live (crops on farmland, cane next to water...).
+//! - plants can only be placed where they can live (crops on farmland, cane next to water...);
+//! - grass (and mycelium) spreads to nearby dirt in the light and dies under opaque blocks;
+//!   ice and snow melt next to strong light (torches, lava...); bamboo grows.
 
 use super::{blocks, entities, health, sound, Player, Server};
 use crate::data::{self, Block};
@@ -14,8 +16,6 @@ use crate::protocol::{id, packet, BlockPos, Writer};
 use crate::world::{Dimension, World};
 use std::sync::{Arc, OnceLock};
 
-/// Random ticks per section and tick (vanilla's `randomTickSpeed`).
-const TICKS_PER_SECTION: usize = 3;
 /// Chunks around each player that get random ticks.
 const RADIUS: i32 = 6;
 
@@ -54,7 +54,9 @@ fn tickable() -> &'static Vec<bool> {
         (0..reg.state_count() as u16)
             .map(|s| {
                 let n = reg.block_of_state(s).name.as_str();
-                CROPS.contains(&n) || SAPLINGS.contains(&n) || matches!(n, "farmland" | "pumpkin_stem" | "melon_stem" | "sweet_berry_bush" | "nether_wart" | "sugar_cane" | "cactus")
+                CROPS.contains(&n)
+                    || SAPLINGS.contains(&n)
+                    || matches!(n, "farmland" | "pumpkin_stem" | "melon_stem" | "sweet_berry_bush" | "nether_wart" | "sugar_cane" | "cactus" | "grass_block" | "mycelium" | "ice" | "snow" | "bamboo" | "bamboo_sapling")
             })
             .collect()
     })
@@ -140,6 +142,7 @@ pub fn tick(server: &Arc<Server>) {
         chunks.sort_unstable();
         chunks.dedup();
         let wanted = tickable();
+        let per_section = server.rule_int("randomTickSpeed").clamp(0, 4096) as usize;
         let raining = dim == Dimension::Overworld && server.weather.lock().unwrap().is_raining();
         let mut changes: Vec<(BlockPos, u16)> = Vec::new();
         let mut popped: Vec<(BlockPos, u16)> = Vec::new();
@@ -147,7 +150,7 @@ pub fn tick(server: &Arc<Server>) {
             let mut world = server.world(dim).lock().unwrap();
             let mut picked = Vec::new();
             for (cx, cz) in chunks {
-                world.random_blocks(cx, cz, TICKS_PER_SECTION, &|s| wanted.get(s as usize).copied().unwrap_or(false), &mut rand_u32, &mut picked);
+                world.random_blocks(cx, cz, per_section, &|s| wanted.get(s as usize).copied().unwrap_or(false), &mut rand_u32, &mut picked);
             }
             for (p, state) in picked {
                 random_tick(&mut world, p, state, raining, &mut changes, &mut popped);
@@ -228,6 +231,57 @@ fn random_tick(world: &mut World, p: BlockPos, state: u16, raining: bool, change
             let age = age_of(block, state);
             if age < 3 && rand(10) == 0 {
                 set(world, p, with_age(block, state, age + 1), changes);
+            }
+        }
+        "grass_block" | "mycelium" => {
+            let up = world.get_block(above);
+            // Smothered by an opaque block (or water) on top: back to dirt.
+            if reg.light(up).0 >= 15 || reg.block_of_state(up).name == "water" {
+                set(world, p, reg.state("dirt"), changes);
+                return;
+            }
+            if !bright(world, above) {
+                return;
+            }
+            // Spreads to dirt around (one block up, three down) that has light and air on top.
+            for _ in 0..4 {
+                let q = BlockPos::new(p.x + rand(3) as i32 - 1, p.y + rand(5) as i32 - 3, p.z + rand(3) as i32 - 1);
+                let q_up = BlockPos::new(q.x, q.y + 1, q.z);
+                let top = world.get_block(q_up);
+                if name(world, q) == "dirt" && reg.light(top).0 < 15 && reg.block_of_state(top).name != "water" {
+                    let s = if n == "mycelium" { reg.state("mycelium") } else { reg.state("grass_block") };
+                    set(world, q, s, changes);
+                }
+            }
+        }
+        "ice" | "snow" => {
+            // Strong block light (more than 11) melts them: ice into water, snow away.
+            if block_light(world, p) > 11 {
+                let below = name(world, below);
+                let s = if n == "ice" && below != "air" { reg.state("water") } else { 0 };
+                set(world, p, s, changes);
+            }
+        }
+        "bamboo_sapling" => {
+            if bright(world, p) && rand(3) == 0 {
+                set(world, p, reg.state("bamboo"), changes);
+            }
+        }
+        "bamboo" => {
+            if !reg.is_air(world.get_block(above)) || !bright(world, above) || rand(3) != 0 {
+                return;
+            }
+            let mut height = 1;
+            while height < 16 && name(world, BlockPos::new(p.x, p.y - height, p.z)) == "bamboo" {
+                height += 1;
+            }
+            // Each stalk stops somewhere between 12 and 16.
+            let max = 12 + (crate::world::structures::hash(0xBA, p.x as i64, 0, p.z as i64) % 5) as i32;
+            if height < max {
+                let leaves = if height >= 2 { "large" } else { "small" };
+                if let Some(b) = reg.block("bamboo") {
+                    set(world, above, b.with(b.default_state, "leaves", leaves), changes);
+                }
             }
         }
         "sugar_cane" | "cactus" => {
@@ -418,6 +472,19 @@ pub fn bone_meal(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos) -> b
                 advance_sapling(&mut world, pos, block, state, &mut changes);
             }
             true
+        } else if n == "bamboo" || n == "bamboo_sapling" {
+            // One or two more segments on top of the stalk.
+            let mut top = pos;
+            while name(&mut world, BlockPos::new(top.x, top.y + 1, top.z)) == "bamboo" {
+                top = BlockPos::new(top.x, top.y + 1, top.z);
+            }
+            for k in 1..=1 + rand(2) as i32 {
+                let q = BlockPos::new(top.x, top.y + k, top.z);
+                if reg.is_air(world.get_block(q)) {
+                    set(&mut world, q, reg.state("bamboo"), &mut changes);
+                }
+            }
+            true
         } else if n == "grass_block" {
             // Grass and some flowers sprout around.
             let (grass, flowers) = (reg.state("short_grass"), [reg.state("dandelion"), reg.state("poppy")]);
@@ -445,6 +512,22 @@ pub fn bone_meal(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos) -> b
     true
 }
 
+/// Approximate block light at `p`: the strongest light source minus its distance.
+fn block_light(world: &mut World, p: BlockPos) -> i32 {
+    let reg = data::get();
+    let mut best = 0;
+    for dx in -3..=3i32 {
+        for dy in -3..=3i32 {
+            for dz in -3..=3i32 {
+                let d = dx.abs() + dy.abs() + dz.abs();
+                let emit = reg.light(world.get_block(BlockPos::new(p.x + dx, p.y + dy, p.z + dz))).1 as i32;
+                best = best.max(emit - d);
+            }
+        }
+    }
+    best
+}
+
 /// Can this plant live at `p`?
 pub fn can_place(world: &mut World, block: &str, p: BlockPos) -> bool {
     let below = BlockPos::new(p.x, p.y - 1, p.z);
@@ -453,6 +536,7 @@ pub fn can_place(world: &mut World, block: &str, p: BlockPos) -> bool {
         _ if CROPS.contains(&block) || matches!(block, "pumpkin_stem" | "melon_stem" | "pitcher_crop") => ground == "farmland",
         _ if SAPLINGS.contains(&block) || block == "sweet_berry_bush" => SOIL.contains(&ground),
         "nether_wart" => ground == "soul_sand",
+        "bamboo" | "bamboo_sapling" => ground == "bamboo" || SOIL.contains(&ground) || matches!(ground, "sand" | "red_sand" | "gravel" | "suspicious_sand"),
         "sugar_cane" => {
             ground == "sugar_cane"
                 || (matches!(ground, "grass_block" | "dirt" | "coarse_dirt" | "podzol" | "rooted_dirt" | "sand" | "red_sand" | "mud" | "moss_block")

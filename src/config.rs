@@ -19,8 +19,13 @@ pub struct Config {
     pub ws_allowed_origins: Vec<String>,
     #[serde(rename = "max-players")]
     pub max_players: usize,
+    /// Encrypted login checked against Mojang's session servers (real UUIDs and skins).
     #[serde(rename = "online-mode")]
     pub online_mode: bool,
+    /// Also require a Mojang account from WebSocket clients (browser clients usually cannot
+    /// authenticate, so by default they keep joining in offline mode).
+    #[serde(rename = "online-mode-ws")]
+    pub online_mode_ws: bool,
     /// 0 survival, 1 creative, 2 adventure, 3 spectator.
     #[serde(rename = "gameMode")]
     pub game_mode: u8,
@@ -42,6 +47,9 @@ pub struct Config {
     pub player_list_text: PlayerListText,
     #[serde(rename = "everybody-op")]
     pub everybody_op: bool,
+    /// Only players on `whitelist.json` (and operators) can join (`/whitelist on|off`).
+    #[serde(rename = "white-list")]
+    pub white_list: bool,
     /// Query protocol (GameSpy4) over UDP, like vanilla's `enable-query`.
     #[serde(rename = "enable-query")]
     pub enable_query: bool,
@@ -110,6 +118,7 @@ impl Default for Config {
             ws_allowed_origins: vec![],
             max_players: 20,
             online_mode: false,
+            online_mode_ws: false,
             game_mode: 1,
             difficulty: 1,
             world_folder: "world".into(),
@@ -120,6 +129,7 @@ impl Default for Config {
             ws_compression_threshold: None,
             player_list_text: PlayerListText::default(),
             everybody_op: true,
+            white_list: false,
             enable_query: true,
             query_port: None,
             anti_cheat: true,

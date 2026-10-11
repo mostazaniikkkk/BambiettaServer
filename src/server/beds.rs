@@ -139,6 +139,7 @@ pub fn use_bed(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos, block:
         st.sleep_ticks = 0;
         st.eating = None;
     }
+    super::advancements::grant(server, player, "adventure/sleep_in_bed");
     super::play::teleport(server, player, head.x as f64 + 0.5, head.y as f64 + 0.5625, head.z as f64 + 0.5);
     set_occupied(server, dim, head, true);
     let p = pose_packet(player.eid, Some(head));
@@ -179,7 +180,10 @@ pub fn tick(server: &Arc<Server>) {
             None => awake += 1,
         }
     }
-    if ready == 0 || awake > 0 {
+    // playersSleepingPercentage: enough of the players asleep is enough.
+    let pct = server.rule_int("playersSleepingPercentage").clamp(0, 100) as usize;
+    let needed = ((ready + awake) * pct).div_ceil(100).max(1);
+    if ready == 0 || ready < needed {
         return;
     }
     let t = server.day_time.load(Ordering::Relaxed);

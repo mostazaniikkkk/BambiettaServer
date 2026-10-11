@@ -331,6 +331,10 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         super::portals::place_eye(server, player, req.location, req.hand);
         return;
     }
+    // Shears or a bottle on a full hive.
+    if super::bees::harvest(server, player, req.location, &stack, req.hand) {
+        return;
+    }
     // Hoe: farmland. Bone meal: plants grow.
     if super::farming::till(server, player, req.location, req.face, &stack) {
         return;
@@ -492,6 +496,9 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         set(server, dim, p, s);
     }
     set(server, dim, target, state);
+    if matches!(block.name.as_str(), "wheat" | "carrots" | "potatoes" | "beetroots" | "melon_stem" | "pumpkin_stem" | "torchflower_crop" | "pitcher_crop" | "nether_wart") {
+        super::advancements::grant(server, player, "husbandry/plant_seed");
+    }
     if let Some(mut be) = crate::world::blockentity::BlockEntity::for_block(&block.name) {
         if let crate::world::blockentity::BlockEntity::Banner(layers) = &mut be {
             *layers = super::stations::banner_layers(&stack);

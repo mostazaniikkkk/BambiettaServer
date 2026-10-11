@@ -158,6 +158,16 @@ pub fn damage(server: &Arc<Server>, player: &Arc<Player>, amount: f32, kind: &st
         super::beds::wake(server, player);
     }
     let bypass = matches!(kind, "out_of_world" | "generic_kill");
+    // Damage turned off by game rules.
+    let off = match kind {
+        "fall" => !server.rule("fallDamage"),
+        "in_fire" | "on_fire" | "lava" | "hot_floor" => !server.rule("fireDamage"),
+        "drown" => !server.rule("drowningDamage"),
+        _ => false,
+    };
+    if off {
+        return false;
+    }
     let (died, broken) = {
         let mut st = player.state.lock().unwrap();
         if st.dead || amount <= 0.0 || (!st.survival_like() && !bypass) || st.game_mode == 3 {
@@ -181,6 +191,9 @@ pub fn damage(server: &Arc<Server>, player: &Arc<Player>, amount: f32, kind: &st
                 let mut p = packet(id::play::ENTITY_STATUS);
                 p.i32(player.eid).i8(broke.unwrap_or(29));
                 server.broadcast_tracked(player.eid, &p, true);
+                if matches!(kind, "arrow" | "trident") {
+                    super::advancements::grant(server, player, "story/deflect_arrow");
+                }
                 if broke.is_some() {
                     player.state.lock().unwrap().using = None;
                     server.broadcast_tracked(player.eid, &super::play::metadata(player), true);
@@ -253,6 +266,7 @@ fn death_message(name: &str, kind: &str, killer: Option<&str>) -> String {
         ("lava", _) => format!("{name} intentó nadar en lava"),
         ("explosion" | "player_explosion", _) => format!("{name} voló por los aires"),
         ("drown", _) => format!("{name} se ahogó"),
+        ("outside_border", _) => format!("{name} murió fuera del borde del mundo"),
         _ => format!("{name} murió"),
     }
 }
@@ -263,8 +277,12 @@ pub fn die(server: &Arc<Server>, player: &Arc<Player>, msg: &str) {
         if st.dead {
             return;
         }
-        let xp = super::experience::death_drop(&st);
-        (st.xp_level, st.xp_progress, st.xp_total) = (0, 0.0, 0);
+        // keepInventory: items and experience stay with the player.
+        let keep = server.rule("keepInventory");
+        let xp = if keep { 0 } else { super::experience::death_drop(&st) };
+        if !keep {
+            (st.xp_level, st.xp_progress, st.xp_total) = (0, 0.0, 0);
+        }
         player.send(super::experience::packet_for(&st));
         st.dead = true;
         st.health = 0.0;
@@ -273,7 +291,7 @@ pub fn die(server: &Arc<Server>, player: &Arc<Player>, msg: &str) {
         st.absorption = 0.0;
         st.digging = None;
         st.fall_distance = 0.0;
-        let items = st.inv.drain();
+        let items = if keep { Vec::new() } else { st.inv.drain() };
         let p = st.inv.window_items();
         player.send(p);
         player.send(health_packet(0.0, st.food, st.saturation));
@@ -293,7 +311,9 @@ pub fn die(server: &Arc<Server>, player: &Arc<Player>, msg: &str) {
     let mut status = packet(id::play::ENTITY_STATUS);
     status.i32(player.eid).i8(3);
     server.broadcast_tracked(player.eid, &status, false);
-    server.broadcast_message(&format!("§c{msg}"));
+    if server.rule("showDeathMessages") {
+        server.broadcast_message(&format!("§c{msg}"));
+    }
     for item in items {
         let a = entities::random() as f64 * std::f64::consts::TAU;
         let v = entities::random() as f64 * 0.5;
@@ -333,6 +353,7 @@ pub async fn respawn(server: &Arc<Server>, player: &Arc<Player>) {
     send_health(player);
     super::effects::resend(player);
     super::weather::send_state(server, player);
+    super::border::send_state(server, player);
     let (inv, xp) = {
         let mut st = player.state.lock().unwrap();
         (st.inv.window_items(), super::experience::packet_for(&st))
@@ -438,6 +459,7 @@ pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
     super::portals::tick_player(server, player);
     super::effects::tick(server, player);
     let mut leftovers = Vec::new();
+    let mut ate = false;
     let mut after = None;
     let (pos, sneaking, survival) = {
         let mut st = player.state.lock().unwrap();
@@ -463,6 +485,7 @@ pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
                 Some(t) if age - start >= t => {
                     st.eating = None;
                     after = finish_eating(player, &mut st, hand);
+                    ate = true;
                 }
                 None => st.eating = None,
                 _ => {}
@@ -472,6 +495,9 @@ pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
     };
     for item in leftovers {
         entities::throw_from(server, player, item);
+    }
+    if ate {
+        super::advancements::grant(server, player, "husbandry/root");
     }
     match after {
         Some(AfterEating::Potion(p)) => super::effects::apply_potion(server, player, &p, 1.0),
@@ -565,7 +591,10 @@ pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
                 st.food = (st.food - 1).max(0);
             }
         }
-        if st.saturation > 0.0 && st.food >= 20 && st.health < 20.0 {
+        let regen = server.rule("naturalRegeneration");
+        if !regen {
+            st.regen_timer = 0;
+        } else if st.saturation > 0.0 && st.food >= 20 && st.health < 20.0 {
             st.regen_timer += 1;
             if st.regen_timer >= 10 {
                 let amount = st.saturation.min(6.0);

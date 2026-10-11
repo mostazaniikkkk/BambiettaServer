@@ -1,9 +1,14 @@
 //! Global server state and periodic tasks.
 
+pub mod admin;
+pub mod auth;
+pub mod advancements;
 pub mod animals;
 pub mod anticheat;
 pub mod beds;
+pub mod bees;
 pub mod blocks;
+pub mod border;
 pub mod brewing;
 pub mod commands;
 pub mod containers;
@@ -19,6 +24,7 @@ pub mod farming;
 pub mod fire;
 pub mod fishing;
 pub mod fluids;
+pub mod gamerules;
 pub mod health;
 pub mod inventory;
 pub mod maps;
@@ -75,6 +81,9 @@ pub struct Server {
     pub bobbers: Mutex<HashMap<i32, fishing::Bobber>>,
     pub dragon: Mutex<dragon::Fight>,
     pub weather: Mutex<weather::Weather>,
+    pub rules: Mutex<gamerules::GameRules>,
+    pub admin: Mutex<admin::Admin>,
+    pub border: Mutex<border::Border>,
     /// Already populated villages (loaded from `villages.json` on first use).
     pub villages: Mutex<Option<HashSet<(i32, i32)>>>,
     /// One save at a time (region files are written outside the world lock).
@@ -86,6 +95,10 @@ pub struct Player {
     pub uuid: u128,
     pub name: String,
     pub transport: &'static str,
+    /// Address it connected from.
+    pub peer: std::net::SocketAddr,
+    /// Profile properties from Mojang (the skin), empty in offline mode.
+    pub properties: Vec<auth::Property>,
     pub tx: Tx,
     /// Notified to close the session (kick, shutdown).
     pub closed: Notify,
@@ -145,6 +158,8 @@ pub struct PlayerState {
     pub effects: Vec<effects::ActiveEffect>,
     /// Extra hearts (Absorption).
     pub absorption: f32,
+    /// Advancements made: id -> when (Unix ms).
+    pub advancements: HashMap<String, i64>,
     /// Remaining burning ticks.
     pub fire_ticks: i32,
     /// Vehicle being ridden.
@@ -208,6 +223,7 @@ impl PlayerState {
             portal_cooldown: 0,
             effects: Vec::new(),
             absorption: 0.0,
+            advancements: HashMap::new(),
             fire_ticks: 0,
             vehicle: None,
             editing_sign: None,
@@ -255,6 +271,21 @@ impl Server {
         let dragon_killed = anvil.as_ref().is_some_and(|l| l.dragon_killed);
         let w = anvil.as_ref().map_or((false, 0, false, 0, 0), |l| l.weather);
         let weather = weather::Weather::new(w.0, w.1, w.2, w.3, w.4);
+        let rules = gamerules::GameRules::new(&anvil.as_ref().map_or(vec![], |l| l.rules.clone()));
+        let admin = admin::Admin::load(config.white_list);
+        let world_border = match anvil.as_ref().and_then(|l| l.border.clone()) {
+            Some(b) => border::Border {
+                center: b.center,
+                size: b.size,
+                target: b.target,
+                lerp_ticks: b.lerp_ms / 50,
+                damage_per_block: b.damage_per_block,
+                safe_zone: b.safe_zone,
+                warning_blocks: b.warning_blocks,
+                warning_time: b.warning_time,
+            },
+            None => border::Border::default(),
+        };
         let spawn = match anvil.and_then(|l| l.spawn) {
             Some(s) => s,
             None => overworld.spawn_point(),
@@ -281,6 +312,9 @@ impl Server {
             bobbers: Mutex::new(HashMap::new()),
             dragon: Mutex::new(dragon::Fight::new(dragon_killed)),
             weather: Mutex::new(weather),
+            rules: Mutex::new(rules),
+            admin: Mutex::new(admin),
+            border: Mutex::new(world_border),
             villages: Mutex::new(None),
             save_lock: Mutex::new(()),
         }))
@@ -353,6 +387,11 @@ impl Server {
         let views = self.views();
         let (age, day_time) = (self.age.load(Ordering::Relaxed), self.day_time.load(Ordering::Relaxed));
         let weather = self.weather.lock().unwrap().saved();
+        let rules = self.rules.lock().unwrap().saved();
+        let level_border = {
+            let b = self.border.lock().unwrap();
+            crate::world::anvil::LevelBorder { center: b.center, size: b.size, target: b.target, lerp_ms: b.lerp_ticks * 50, safe_zone: b.safe_zone, damage_per_block: b.damage_per_block, warning_blocks: b.warning_blocks, warning_time: b.warning_time }
+        };
         let dragon = {
             let f = self.dragon.lock().unwrap();
             (f.killed, f.previously_killed)
@@ -387,6 +426,8 @@ impl Server {
                     self.config.difficulty,
                     dragon,
                     weather,
+                    &rules,
+                    &level_border,
                 )?;
             }
             // Free chunks far from every player in that dimension.
@@ -432,7 +473,7 @@ impl Server {
         loop {
             interval.tick().await;
             let age = self.age.fetch_add(1, Ordering::Relaxed) + 1;
-            let time = self.day_time.fetch_add(1, Ordering::Relaxed) + 1;
+            let time = if self.rule("doDaylightCycle") { self.day_time.fetch_add(1, Ordering::Relaxed) + 1 } else { self.day_time.load(Ordering::Relaxed) };
             if age % 20 == 0 {
                 self.broadcast(&update_time(age, time), None);
             }
@@ -456,7 +497,11 @@ impl Server {
             redstone::tick(&self, age);
             fire::tick(&self, age);
             weather::tick(&self, age);
+            border::tick(&self, age);
             farming::tick(&self);
+            if age % 20 == 5 {
+                advancements::tick(&self);
+            }
             spawners::tick(&self);
             eyes::tick(&self);
             mark("redstone/fuego/clima");
@@ -524,6 +569,10 @@ impl Player {
         self.send(system_chat(msg));
     }
 
+    pub fn peer_ip(&self) -> String {
+        self.peer.ip().to_string()
+    }
+
     pub fn kick(&self, reason: &str) {
         let mut p = packet(id::play::KICK_DISCONNECT);
         text(reason).write_network(&mut p);
@@ -533,7 +582,7 @@ impl Player {
     }
 
     pub fn is_op(&self, server: &Server) -> bool {
-        server.config.everybody_op
+        server.config.everybody_op || server.admin.lock().unwrap().is_op(&format_uuid(self.uuid))
     }
 }
 
@@ -583,5 +632,17 @@ mod tests {
     fn offline_uuid_matches_vanilla() {
         // Known value: offline player "Notch".
         assert_eq!(super::format_uuid(super::offline_uuid("Notch")), "b50ad385-829d-3141-a216-7e7d7539ba7f");
+    }
+}
+
+impl Server {
+    /// A boolean game rule.
+    pub fn rule(&self, name: &str) -> bool {
+        self.rules.lock().unwrap().bool(name)
+    }
+
+    /// A numeric game rule.
+    pub fn rule_int(&self, name: &str) -> i32 {
+        self.rules.lock().unwrap().int(name)
     }
 }

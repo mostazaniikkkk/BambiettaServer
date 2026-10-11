@@ -193,6 +193,7 @@ pub fn refresh(server: &Arc<Server>, player: &Arc<Player>) {
 
 /// The player clicked one of the three options.
 pub fn enchant(server: &Arc<Server>, player: &Arc<Player>, button: usize) {
+    super::advancements::grant(server, player, "story/enchant_item");
     {
         let mut st = player.state.lock().unwrap();
         let creative = st.game_mode == 1;

@@ -25,9 +25,19 @@ const COMMANDS: &[Command] = &[
     Command { name: "gm", usage: "/gm <0-3> [jugador]", help: "Alias de /gamemode", op: true, run: gamemode },
     Command { name: "tp", usage: "/tp <x y z> | <jugador> | <jugador> <destino>", help: "Teletransportar", op: true, run: tp },
     Command { name: "locate", usage: "/locate <stronghold|dungeon|village|pyramid|outpost|fortress>", help: "Buscar la estructura más cercana", op: true, run: locate },
+    Command { name: "gamerule", usage: "/gamerule <regla> [valor]", help: "Ver o cambiar una regla del juego", op: true, run: gamerule },
+    Command { name: "worldborder", usage: "/worldborder <get|set|add|center|damage|warning> ...", help: "Borde del mundo", op: true, run: super::border::command },
     Command { name: "weather", usage: "/weather <clear|rain|thunder> [segundos]", help: "Cambiar el clima", op: true, run: weather },
     Command { name: "time", usage: "/time set <day|noon|night|midnight|ticks> | /time add <ticks>", help: "Cambiar la hora", op: true, run: time },
     Command { name: "say", usage: "/say <mensaje>", help: "Anuncio global", op: true, run: say },
+    Command { name: "ban", usage: "/ban <jugador> [motivo]", help: "Banear a un jugador", op: true, run: ban },
+    Command { name: "pardon", usage: "/pardon <jugador>", help: "Quitar el baneo a un jugador", op: true, run: pardon },
+    Command { name: "ban-ip", usage: "/ban-ip <ip|jugador> [motivo]", help: "Banear una IP", op: true, run: ban_ip },
+    Command { name: "pardon-ip", usage: "/pardon-ip <ip>", help: "Quitar el baneo a una IP", op: true, run: pardon_ip },
+    Command { name: "banlist", usage: "/banlist [ips]", help: "Lista de baneos", op: true, run: banlist },
+    Command { name: "whitelist", usage: "/whitelist <on|off|add|remove|list> [jugador]", help: "Lista blanca", op: true, run: whitelist },
+    Command { name: "op", usage: "/op <jugador>", help: "Dar permisos de operador", op: true, run: op },
+    Command { name: "deop", usage: "/deop <jugador>", help: "Quitar permisos de operador", op: true, run: deop },
     Command { name: "kick", usage: "/kick <jugador> [motivo]", help: "Expulsar a un jugador", op: true, run: kick },
     Command { name: "give", usage: "/give <ítem>[{nbt}] [cantidad] [jugador]", help: "Dar ítems (con NBT: pociones, libros...)", op: true, run: give },
     Command { name: "effect", usage: "/effect <efecto> [segundos] [nivel] [jugador] | /effect clear [jugador]", help: "Dar o quitar efectos", op: true, run: effect },
@@ -204,6 +214,27 @@ fn locate(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
     }
 }
 
+fn gamerule(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let mut it = args.split_whitespace();
+    let Some(name) = it.next() else {
+        let rules = s.rules.lock().unwrap();
+        let list: Vec<String> = super::gamerules::GameRules::names().map(|n| format!("{n}={}", rules.get(n).unwrap_or_default())).collect();
+        p.message(&format!("§7{}", list.join(", ")));
+        return Ok(());
+    };
+    match it.next() {
+        None => {
+            let v = s.rules.lock().unwrap().get(name).ok_or_else(|| format!("Regla desconocida: {name}"))?;
+            p.message(&format!("§a{name} = §f{v}"));
+        }
+        Some(v) => {
+            s.rules.lock().unwrap().set(name, v)?;
+            p.message(&format!("§aRegla {name} = §f{v}"));
+        }
+    }
+    Ok(())
+}
+
 fn weather(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
     let mut it = args.split_whitespace();
     let kind = it.next().ok_or_default()?;
@@ -262,6 +293,133 @@ fn kick(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
     let w = target(s, who)?;
     w.kick(&format!("§c{reason}"));
     p.message(&format!("§aExpulsado {}", w.name));
+    Ok(())
+}
+
+/// UUID (vanilla text form) and exact name of a player, online or not (offline-mode UUID).
+fn who_is(s: &Server, name: &str) -> (String, String) {
+    match s.find_player(name) {
+        Some(p) => (super::format_uuid(p.uuid), p.name.clone()),
+        None => (super::format_uuid(super::offline_uuid(name)), name.to_string()),
+    }
+}
+
+fn ban(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let (name, reason) = args.split_once(' ').unwrap_or((args, "Baneado por un operador."));
+    if name.is_empty() {
+        return Err(String::new());
+    }
+    let (uuid, exact) = who_is(s, name);
+    s.admin.lock().unwrap().ban(uuid, exact.clone(), &p.name, reason);
+    if let Some(t) = s.find_player(&exact) {
+        t.kick(&format!("§cHas sido baneado.\n§7{reason}"));
+    }
+    p.message(&format!("§aBaneado {exact}: {reason}"));
+    Ok(())
+}
+
+fn pardon(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let name = args.split_whitespace().next().ok_or_default()?;
+    if !s.admin.lock().unwrap().pardon(name) {
+        return Err(format!("{name} no estaba baneado"));
+    }
+    p.message(&format!("§aBaneo de {name} retirado"));
+    Ok(())
+}
+
+fn ban_ip(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let (target, reason) = args.split_once(' ').unwrap_or((args, "Baneado por un operador."));
+    if target.is_empty() {
+        return Err(String::new());
+    }
+    // A player's name stands for the IP it is connected from.
+    let found = s.find_player(target);
+    let ip = match &found {
+        Some(t) => t.peer_ip(),
+        None => target.parse::<std::net::IpAddr>().map(|ip| ip.to_string()).map_err(|_| format!("Ni IP ni jugador conectado: {target}"))?,
+    };
+    if ip.parse::<std::net::IpAddr>().is_ok_and(|a| a.is_loopback()) {
+        return Err(format!("{ip} es la dirección local (la del túnel de WebSocket): banearla dejaría fuera a todos los que entran por él"));
+    }
+    s.admin.lock().unwrap().ban_ip(ip.clone(), &p.name, reason);
+    for t in s.online().into_iter().filter(|t| t.peer_ip() == ip) {
+        t.kick(&format!("§cTu IP ha sido baneada.\n§7{reason}"));
+    }
+    p.message(&format!("§aIP {ip} baneada: {reason}"));
+    Ok(())
+}
+
+fn pardon_ip(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let ip = args.split_whitespace().next().ok_or_default()?;
+    if !s.admin.lock().unwrap().pardon_ip(ip) {
+        return Err(format!("{ip} no estaba baneada"));
+    }
+    p.message(&format!("§aBaneo de la IP {ip} retirado"));
+    Ok(())
+}
+
+fn banlist(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let a = s.admin.lock().unwrap();
+    if args.trim() == "ips" {
+        let list: Vec<String> = a.ip_bans.iter().map(|b| format!("{} ({})", b.ip, b.reason)).collect();
+        p.message(&format!("§a{} IP baneadas: §f{}", list.len(), list.join(", ")));
+    } else {
+        let list: Vec<String> = a.bans.iter().map(|b| format!("{} ({})", b.name, b.reason)).collect();
+        p.message(&format!("§a{} jugadores baneados: §f{}", list.len(), list.join(", ")));
+    }
+    Ok(())
+}
+
+fn whitelist(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let mut it = args.split_whitespace();
+    let sub = it.next().ok_or_default()?;
+    let mut a = s.admin.lock().unwrap();
+    match sub {
+        "on" | "off" => {
+            a.set_whitelist(sub == "on");
+            p.message(&format!("§aLista blanca {}", if sub == "on" { "activada" } else { "desactivada" }));
+        }
+        "add" => {
+            let name = it.next().ok_or_default()?;
+            drop(a);
+            let (uuid, exact) = who_is(s, name);
+            if !s.admin.lock().unwrap().whitelist_add(uuid, exact.clone()) {
+                return Err(format!("{exact} ya estaba en la lista blanca"));
+            }
+            p.message(&format!("§a{exact} añadido a la lista blanca"));
+        }
+        "remove" => {
+            let name = it.next().ok_or_default()?;
+            if !a.whitelist_remove(name) {
+                return Err(format!("{name} no estaba en la lista blanca"));
+            }
+            p.message(&format!("§a{name} quitado de la lista blanca"));
+        }
+        "list" => {
+            let names: Vec<&str> = a.whitelist.iter().map(|w| w.name.as_str()).collect();
+            p.message(&format!("§aLista blanca ({}, {}): §f{}", if a.whitelist_on { "activa" } else { "inactiva" }, names.len(), names.join(", ")));
+        }
+        _ => return Err(String::new()),
+    }
+    Ok(())
+}
+
+fn op(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let name = args.split_whitespace().next().ok_or_default()?;
+    let (uuid, exact) = who_is(s, name);
+    if !s.admin.lock().unwrap().op(uuid, exact.clone()) {
+        return Err(format!("{exact} ya era operador"));
+    }
+    p.message(&format!("§a{exact} ahora es operador"));
+    Ok(())
+}
+
+fn deop(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let name = args.split_whitespace().next().ok_or_default()?;
+    if !s.admin.lock().unwrap().deop(name) {
+        return Err(format!("{name} no era operador"));
+    }
+    p.message(&format!("§a{name} ya no es operador"));
     Ok(())
 }
 

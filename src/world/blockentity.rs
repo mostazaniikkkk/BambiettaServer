@@ -15,6 +15,8 @@ pub enum BlockEntity {
     Banner(Vec<(String, i32)>),
     /// Mob spawner: which mob, and ticks until the next spawn.
     Spawner { mob: String, delay: i32 },
+    /// Bee nest or beehive: how many bees are inside.
+    Hive { bees: u32 },
 }
 
 /// Brewing stand: 0-2 bottles, 3 ingredient, 4 blaze powder.
@@ -141,6 +143,7 @@ impl BlockEntity {
             "brewing_stand" => Some(BlockEntity::Brewing(Brewing { items: vec![None; 5], ..Default::default() })),
             n if n.ends_with("_sign") => Some(BlockEntity::Sign(Sign::default())),
             n if n.ends_with("_banner") => Some(BlockEntity::Banner(vec![])),
+            "bee_nest" | "beehive" => Some(BlockEntity::Hive { bees: 0 }),
             _ => None,
         }
     }
@@ -151,7 +154,7 @@ impl BlockEntity {
             BlockEntity::Container(items) => items.iter().flatten().cloned().collect(),
             BlockEntity::Furnace(f) => f.items.iter().flatten().cloned().collect(),
             BlockEntity::Brewing(b) => b.items.iter().flatten().cloned().collect(),
-            BlockEntity::Sign(_) | BlockEntity::Banner(_) | BlockEntity::Spawner { .. } => vec![],
+            BlockEntity::Sign(_) | BlockEntity::Banner(_) | BlockEntity::Spawner { .. } | BlockEntity::Hive { .. } => vec![],
         }
     }
 

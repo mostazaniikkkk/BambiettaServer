@@ -134,6 +134,7 @@ await step('pesca', async () => {
   check(!ents(a, 'fishing_bobber').length, 'el anzuelo desaparece al recoger')
   // Hook another player and reel them in.
   a.chat(`/tp ${O.x + 0.5} 100 ${O.z + 0.5}`); b.chat(`/tp ${O.x + 0.5} 100 ${O.z + 6.5}`); await sleep(1000)
+  a.chat('/killmobs all 30'); await sleep(300) // a mob in the way would get hooked instead
   await a.lookAt(b.entity.position.offset(0, 1, 0), true); await sleep(150)
   a.activateItem(); await sleep(150); a.deactivateItem()
   const z0 = b.entity.position.z

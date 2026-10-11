@@ -14,7 +14,7 @@ use anyhow::Result;
 use net::listener::{self, Mode};
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -24,8 +24,10 @@ async fn main() -> Result<()> {
 
     let path = std::env::args().nth(1).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("config.json"));
     let config = config::Config::load(&path)?;
+    let _ = server::admin::CONFIG_PATH.set(path.clone());
     if config.online_mode {
-        warn!("online-mode no está soportado (no hay cifrado ni autenticación con Mojang); se usa modo offline");
+        tokio::task::spawn_blocking(server::auth::init).await??;
+        info!("modo online: las cuentas se verifican con Mojang{}", if config.online_mode_ws { "" } else { " (los clientes WebSocket entran en modo offline)" });
     }
     info!("Bambietta Server · Minecraft {} (protocolo {})", protocol::VERSION_NAME, protocol::PROTOCOL_VERSION);
 

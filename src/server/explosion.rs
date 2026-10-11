@@ -65,10 +65,12 @@ pub fn explode(server: &Arc<Server>, dim: Dimension, center: [f64; 3], power: f3
 pub fn explode_ex(server: &Arc<Server>, dim: Dimension, center: [f64; 3], power: f32, source: Option<Attacker>, fire: bool) {
     let reg = data::get();
     tracing::debug!("explosión de potencia {power} en {:.1} {:.1} {:.1}", center[0], center[1], center[2]);
-    // 1. Blocks.
+    // 1. Blocks (a mob's explosion only breaks them with mobGriefing on).
+    let by_mob = source.as_ref().is_some_and(|a| server.mobs.lock().unwrap().contains_key(&a.eid));
+    let grief = !by_mob || server.rule("mobGriefing");
     let (blocks, contents, tnt) = {
         let mut world = server.world(dim).lock().unwrap();
-        let blocks = affected_blocks(&mut world, center, power);
+        let blocks = if grief { affected_blocks(&mut world, center, power) } else { Vec::new() };
         let mut contents = Vec::new();
         let mut destroyed = Vec::new();
         let mut tnt = Vec::new();

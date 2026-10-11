@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bambietta WS Status</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 16px; }
+  input { width: 18rem; } pre { background: #f3f3f3; padding: 1rem; overflow: auto; }
+</style>
+</head>
+<body>
+<h1>Ping por WebSocket</h1>
+<p>Ejemplo mínimo de cómo un cliente web (Whitefox) habla con Bambietta: los bytes son
+exactamente los del protocolo TCP de Minecraft, transportados en mensajes binarios.</p>
+<input id="url" value="ws://localhost:25565"> <button id="go">Consultar</button>
+<pre id="out">—</pre>
+<script>
+// --- Protocol VarInt + strings ---
+const varint = n => { const b = []; n >>>= 0; do { let x = n & 0x7f; n >>>= 7; if (n) x |= 0x80; b.push(x) } while (n); return b }
+const str = s => { const u = [...new TextEncoder().encode(s)]; return [...varint(u.length), ...u] }
+// Frame = VarInt(length) + body (VarInt id + data)
+const frame = body => new Uint8Array([...varint(body.length), ...body])
+function readVarint (buf, pos) {
+  let v = 0, i = 0, b
+  do { if (pos + i >= buf.length) return null; b = buf[pos + i]; v |= (b & 0x7f) << (7 * i); i++ } while (b & 0x80)
+  return [v, i]
+}
+
+document.getElementById('go').onclick = () => {
+  const out = document.getElementById('out')
+  const ws = new WebSocket(document.getElementById('url').value)
+  ws.binaryType = 'arraybuffer'
+  let pending = new Uint8Array(0)
+  ws.onopen = () => {
+    // Handshake (protocol 765, next state 1 = status) + status request
+    ws.send(frame([0x00, ...varint(765), ...str('localhost'), 0x63, 0xdd, 0x01]))
+    ws.send(frame([0x00]))
+  }
+  ws.onmessage = ev => {
+    // Messages are a stream: accumulate and extract complete frames.
+    const data = new Uint8Array(ev.data)
+    const merged = new Uint8Array(pending.length + data.length)
+    merged.set(pending); merged.set(data, pending.length); pending = merged
+    const len = readVarint(pending, 0)
+    if (!len || pending.length < len[1] + len[0]) return
+    const body = pending.subarray(len[1], len[1] + len[0])
+    const id = readVarint(body, 0)
+    const slen = readVarint(body, id[1])
+    const json = new TextDecoder().decode(body.subarray(id[1] + slen[1], id[1] + slen[1] + slen[0]))
+    out.textContent = JSON.stringify(JSON.parse(json), null, 2)
+    ws.close()
+  }
+  ws.onerror = () => { out.textContent = 'Error de conexión' }
+}
+</script>
+</body>
+</html>

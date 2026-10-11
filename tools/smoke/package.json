@@ -1,0 +1,11 @@
+{
+  "name": "bambietta-smoke-test",
+  "private": true,
+  "type": "module",
+  "description": "Prueba de humo: conecta bots 1.20.4 por TCP y por WebSocket",
+  "dependencies": {
+    "minecraft-protocol": "^1.54.0",
+    "mineflayer": "^4.23.0",
+    "ws": "^8.18.0"
+  }
+}

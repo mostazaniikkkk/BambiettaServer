@@ -1,0 +1,28 @@
+[package]
+name = "bambietta-server"
+version = "0.1.0"
+edition = "2021"
+description = "Minecraft Java 1.20.4 (protocol 765) server in Rust with vanilla TCP and WebSocket (ws/wss) support, based on flying-squid"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+flate2 = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+md-5 = "0.10"
+rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
+rustls-pemfile = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal", "fs"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "logging", "tls12"] }
+tokio-tungstenite = "0.24"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

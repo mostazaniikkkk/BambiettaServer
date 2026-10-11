@@ -331,6 +331,16 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         super::portals::place_eye(server, player, req.location, req.hand);
         return;
     }
+    // Hoe: farmland. Bone meal: plants grow.
+    if super::farming::till(server, player, req.location, req.face, &stack) {
+        return;
+    }
+    if stack.name() == "bone_meal" {
+        if super::farming::bone_meal(server, player, req.location) {
+            consume(player, game_mode, req.hand, &stack);
+        }
+        return;
+    }
     // Buckets are used via `use_item` (like vanilla), not by placing against a block.
     if stack.name().ends_with("_bucket") {
         return;
@@ -368,6 +378,11 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
     let target = if replaceable(clicked) { req.location } else { req.location.offset(req.face) };
     if !in_world(dim, target) || !replaceable(reg.block_of_state(get(server, dim, target))) {
         reject("destino ocupado o fuera del mundo");
+        return;
+    }
+    // Plants only where they can live (crops on farmland, cane next to water...).
+    if !super::farming::can_place(&mut server.world(dim).lock().unwrap(), &block.name, target) {
+        reject("la planta no puede vivir ahí");
         return;
     }
 

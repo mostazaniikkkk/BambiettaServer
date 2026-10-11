@@ -24,6 +24,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "gamemode", usage: "/gamemode <modo> [jugador]", help: "Cambiar modo de juego", op: true, run: gamemode },
     Command { name: "gm", usage: "/gm <0-3> [jugador]", help: "Alias de /gamemode", op: true, run: gamemode },
     Command { name: "tp", usage: "/tp <x y z> | <jugador> | <jugador> <destino>", help: "Teletransportar", op: true, run: tp },
+    Command { name: "weather", usage: "/weather <clear|rain|thunder> [segundos]", help: "Cambiar el clima", op: true, run: weather },
     Command { name: "time", usage: "/time set <day|noon|night|midnight|ticks> | /time add <ticks>", help: "Cambiar la hora", op: true, run: time },
     Command { name: "say", usage: "/say <mensaje>", help: "Anuncio global", op: true, run: say },
     Command { name: "kick", usage: "/kick <jugador> [motivo]", help: "Expulsar a un jugador", op: true, run: kick },
@@ -35,7 +36,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "food", usage: "/food <0-20> [jugador]", help: "Fijar el hambre (QA)", op: true, run: food },
     Command { name: "enchant", usage: "/enchant <encantamiento> [nivel] [jugador]", help: "Encantar el ítem de la mano", op: true, run: enchant },
     Command { name: "xp", usage: "/xp <cantidad>[L] [jugador]", help: "Dar experiencia (L = niveles)", op: true, run: xp },
-    Command { name: "summon", usage: "/summon <mob|barco|minecart> [profesión|tamaño]", help: "Invocar un mob o un vehículo", op: true, run: summon },
+    Command { name: "summon", usage: "/summon <mob|barco|minecart> [profesión|tamaño|patrulla|capitan]", help: "Invocar un mob o un vehículo", op: true, run: summon },
     Command { name: "killmobs", usage: "/killmobs [tipo|all] [radio]", help: "Matar mobs cercanos (QA)", op: true, run: killmobs },
     Command { name: "setblock", usage: "/setblock <x y z> <bloque[prop=valor,...]>", help: "Poner un bloque", op: true, run: setblock },
     Command { name: "fill", usage: "/fill <x1 y1 z1> <x2 y2 z2> <bloque>", help: "Rellenar una zona (máx. 32768)", op: true, run: fill },
@@ -179,6 +180,23 @@ fn tp(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
     };
     super::play::teleport(s, &who, dest.0, dest.1, dest.2);
     p.message(&format!("§aTeletransportado {} a {:.1} {:.1} {:.1}", who.name, dest.0, dest.1, dest.2));
+    Ok(())
+}
+
+fn weather(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let mut it = args.split_whitespace();
+    let kind = it.next().ok_or_default()?;
+    if !matches!(kind, "clear" | "rain" | "thunder") {
+        return Err(format!("Clima desconocido: {kind}"));
+    }
+    let ticks = it.next().map(|v| v.parse::<i32>().map(|s| s * 20).map_err(|_| format!("Duración inválida: {v}"))).transpose()?;
+    s.weather.lock().unwrap().set(kind, ticks);
+    let name = match kind {
+        "clear" => "despejado",
+        "rain" => "lluvia",
+        _ => "tormenta",
+    };
+    p.message(&format!("§aClima: {name}"));
     Ok(())
 }
 
@@ -404,14 +422,27 @@ fn summon(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
         "chest_boat" => Some(super::vehicles::VehicleKind::Boat(0, true)),
         n => super::vehicles::VehicleKind::from_item(n),
     };
+    if name == "lightning_bolt" {
+        if p.dim() != crate::world::Dimension::Overworld {
+            return Err("Los rayos solo caen en el supramundo".into());
+        }
+        super::weather::strike(s, pos[0].floor() as i32, pos[2].floor() as i32);
+        return Ok(());
+    }
     if let Some(v) = vehicle {
         let eid = super::vehicles::spawn(s, p.dim(), v, pos, yaw);
         p.message(&format!("§a{name} invocado (eid {eid})"));
         return Ok(());
     }
     let kind = super::mobs::MobKind::from_name(name).ok_or_else(|| format!("Mob desconocido: {name}"))?;
+    if kind == super::mobs::MobKind::Pillager && matches!(extra, Some("patrulla" | "patrol")) {
+        let eids = super::pillagers::spawn_patrol(s, p.dim(), pos, 4);
+        p.message(&format!("§aPatrulla de saqueadores invocada (capitán eid {})", eids[0]));
+        return Ok(());
+    }
     let eid = super::mobs::spawn(s, p.dim(), kind, pos);
     match (kind, extra) {
+        (super::mobs::MobKind::Pillager, Some("capitan" | "capitán" | "captain")) => super::pillagers::make_captain(s, eid, 1 + (super::entities::random() * 1e9) as u32),
         (super::mobs::MobKind::MagmaCube, Some(n)) => super::mobs::set_size(s, eid, n.parse().map_err(|_| format!("Tamaño inválido: {n}"))?),
         (super::mobs::MobKind::Villager, Some(prof)) => {
             if let Some(m) = s.mobs.lock().unwrap().get_mut(&eid) {

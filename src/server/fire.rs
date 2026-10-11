@@ -180,6 +180,11 @@ pub fn tick(server: &Arc<Server>, age: i64) {
         let below = name_at(&mut world, off(p, (0, -1, 0)));
         let forever = infiniburn(dim, below);
         let age: i32 = block.get(state, "age").and_then(|a| a.parse().ok()).unwrap_or(0);
+        // Rain puts it out (the older the fire, the likelier).
+        if !forever && rand(100) < 20 + age * 3 && super::weather::rain_at(server, &mut world, dim, [p.x as f64 + 0.5, p.y as f64, p.z as f64 + 0.5]) {
+            set(&mut world, p, 0, &mut changes);
+            continue;
+        }
         let new_age = (age + rand(3) / 2).min(15);
         if new_age != age {
             let s = block.with(state, "age", &new_age.to_string());

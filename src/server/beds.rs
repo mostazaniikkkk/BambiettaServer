@@ -120,7 +120,7 @@ pub fn use_bed(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos, block:
             player.message("§7Punto de reaparición establecido");
         }
     }
-    if !is_night(server) {
+    if !is_night(server) && !server.weather.lock().unwrap().is_thundering() {
         action_bar(player, "Solo puedes dormir de noche o durante las tormentas");
         return;
     }
@@ -189,6 +189,7 @@ pub fn tick(server: &Arc<Server>) {
     for p in &players {
         wake(server, p);
     }
+    server.weather.lock().unwrap().clear_after_sleep();
     server.broadcast_message("§eBuenos días");
 }
 

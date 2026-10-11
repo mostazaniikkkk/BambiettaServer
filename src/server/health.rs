@@ -332,6 +332,7 @@ pub async fn respawn(server: &Arc<Server>, player: &Arc<Player>) {
     player.send(super::play::abilities(game_mode));
     send_health(player);
     super::effects::resend(player);
+    super::weather::send_state(server, player);
     let (inv, xp) = {
         let mut st = player.state.lock().unwrap();
         (st.inv.window_items(), super::experience::packet_for(&st))

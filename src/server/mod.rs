@@ -1,5 +1,6 @@
 //! Global server state and periodic tasks.
 
+pub mod animals;
 pub mod anticheat;
 pub mod beds;
 pub mod blocks;
@@ -12,6 +13,7 @@ pub mod enchanting;
 pub mod entities;
 pub mod experience;
 pub mod explosion;
+pub mod farming;
 pub mod fire;
 pub mod fishing;
 pub mod fluids;
@@ -19,6 +21,7 @@ pub mod health;
 pub mod inventory;
 pub mod maps;
 pub mod mobs;
+pub mod pillagers;
 pub mod play;
 pub mod playerdata;
 pub mod portals;
@@ -28,11 +31,13 @@ pub mod ranged;
 pub mod redstone;
 pub mod session;
 pub mod signs;
+pub mod skeletons;
 pub mod sound;
 pub mod stations;
 pub mod tracker;
 pub mod vehicles;
 pub mod villagers;
+pub mod weather;
 
 use crate::config::Config;
 use crate::net::{Out, Tx};
@@ -66,6 +71,7 @@ pub struct Server {
     pub vehicles: Mutex<HashMap<i32, vehicles::Vehicle>>,
     pub bobbers: Mutex<HashMap<i32, fishing::Bobber>>,
     pub dragon: Mutex<dragon::Fight>,
+    pub weather: Mutex<weather::Weather>,
     /// Already populated villages (loaded from `villages.json` on first use).
     pub villages: Mutex<Option<HashSet<(i32, i32)>>>,
     /// One save at a time (region files are written outside the world lock).
@@ -244,6 +250,8 @@ impl Server {
             None => std::fs::read_to_string(overworld.dir().join("level.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(LevelData { age: 0, day_time: 1000 }),
         };
         let dragon_killed = anvil.as_ref().is_some_and(|l| l.dragon_killed);
+        let w = anvil.as_ref().map_or((false, 0, false, 0, 0), |l| l.weather);
+        let weather = weather::Weather::new(w.0, w.1, w.2, w.3, w.4);
         let spawn = match anvil.and_then(|l| l.spawn) {
             Some(s) => s,
             None => overworld.spawn_point(),
@@ -269,6 +277,7 @@ impl Server {
             vehicles: Mutex::new(HashMap::new()),
             bobbers: Mutex::new(HashMap::new()),
             dragon: Mutex::new(dragon::Fight::new(dragon_killed)),
+            weather: Mutex::new(weather),
             villages: Mutex::new(None),
             save_lock: Mutex::new(()),
         }))
@@ -340,6 +349,7 @@ impl Server {
         // Player views before locking the world (lock order: player -> world).
         let views = self.views();
         let (age, day_time) = (self.age.load(Ordering::Relaxed), self.day_time.load(Ordering::Relaxed));
+        let weather = self.weather.lock().unwrap().saved();
         let dragon = {
             let f = self.dragon.lock().unwrap();
             (f.killed, f.previously_killed)
@@ -373,6 +383,7 @@ impl Server {
                     self.config.game_mode,
                     self.config.difficulty,
                     dragon,
+                    weather,
                 )?;
             }
             // Free chunks far from every player in that dimension.
@@ -441,7 +452,9 @@ impl Server {
             mark("fluidos");
             redstone::tick(&self, age);
             fire::tick(&self, age);
-            mark("redstone/fuego");
+            weather::tick(&self, age);
+            farming::tick(&self);
+            mark("redstone/fuego/clima");
             mobs::tick(&self, age);
             projectiles::tick(&self);
             fishing::tick(&self);

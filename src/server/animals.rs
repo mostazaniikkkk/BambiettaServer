@@ -1,0 +1,281 @@
+//! Animals: breeding, babies, following food, and tamed wolves.
+//! - Feeding an adult its food (wheat for cows and sheep, carrots/potatoes/beetroot for pigs,
+//!   seeds for chickens, meat for tamed wolves) puts it in love: it looks for a partner in love
+//!   and they have a baby (5 min cooldown, experience for the player). Babies grow up in 20
+//!   min; feeding them speeds it up.
+//! - Animals follow a player holding their food.
+//! - Wolves: tamed with bones (1 in 3). A tamed wolf sits or stands when its owner uses it,
+//!   follows the owner (teleporting when left behind), attacks whatever the owner hits or
+//!   whatever hurts the owner, and heals with meat.
+
+use super::mobs::{self, Action, Mob, MobKind, Seen};
+use super::{entities, Player, Server};
+use crate::protocol::{id, packet, Writer};
+use crate::world::World;
+use std::sync::Arc;
+
+/// Ticks a baby takes to grow up, and the cooldown after breeding.
+pub const BABY: i32 = -24000;
+const COOLDOWN: i32 = 6000;
+const LOVE: u32 = 600;
+
+/// What other mobs of the dimension look like this tick (partners, prey, owners' wolves).
+#[derive(Clone)]
+pub struct Other {
+    pub eid: i32,
+    pub kind: MobKind,
+    pub pos: [f64; 3],
+    pub love: u32,
+    pub grow: i32,
+}
+
+pub fn snapshot<'a>(mobs: impl Iterator<Item = &'a Mob>) -> Vec<Other> {
+    mobs.filter(|m| m.death_ticks.is_none()).map(|m| Other { eid: m.eid, kind: m.kind, pos: m.pos, love: m.love, grow: m.grow }).collect()
+}
+
+pub fn breeds(kind: MobKind) -> bool {
+    matches!(kind, MobKind::Cow | MobKind::Pig | MobKind::Sheep | MobKind::Chicken | MobKind::Wolf)
+}
+
+/// Food that makes an animal fall in love (and that it follows).
+pub fn is_food(kind: MobKind, item: &str) -> bool {
+    match kind {
+        MobKind::Cow | MobKind::Sheep => item == "wheat",
+        MobKind::Pig => matches!(item, "carrot" | "potato" | "beetroot"),
+        MobKind::Chicken => matches!(item, "wheat_seeds" | "melon_seeds" | "pumpkin_seeds" | "beetroot_seeds" | "torchflower_seeds"),
+        MobKind::Wolf => is_meat(item),
+        _ => false,
+    }
+}
+
+fn is_meat(item: &str) -> bool {
+    matches!(item, "beef" | "cooked_beef" | "porkchop" | "cooked_porkchop" | "chicken" | "cooked_chicken" | "mutton" | "cooked_mutton" | "rabbit" | "cooked_rabbit" | "rotten_flesh")
+}
+
+pub fn status(eid: i32, s: i8) -> Vec<u8> {
+    let mut p = packet(id::play::ENTITY_STATUS);
+    p.i32(eid).i8(s);
+    p
+}
+
+/// Per-tick behaviour of animals and tamed wolves. `Some(goal)` when it decides where to go.
+pub fn behave(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], actions: &mut Vec<Action>) -> Option<([f64; 3], f64)> {
+    // Growing up / breeding cooldown.
+    if m.grow < 0 {
+        m.grow += 1;
+        if m.grow == 0 {
+            actions.push(Action::Meta(mobs::metadata(m), m.eid));
+        }
+    } else if m.grow > 0 {
+        m.grow -= 1;
+    }
+    let speed = m.kind.walk_speed();
+    if m.kind == MobKind::Wolf && m.owner.is_some() {
+        if let Some(g) = tamed_wolf(world, m, seen, others, actions) {
+            return Some(g);
+        }
+    }
+    if !breeds(m.kind) || m.panic > 0 {
+        return None;
+    }
+    // In love: hearts, and off to the closest partner in love.
+    if m.love > 0 {
+        m.love -= 1;
+        if m.love % 10 == 0 {
+            actions.push(Action::Meta(status(m.eid, 18), m.eid));
+        }
+        let partner = others
+            .iter()
+            .filter(|o| o.eid != m.eid && o.kind == m.kind && o.love > 0 && o.grow == 0 && mobs::dist2(&o.pos, &m.pos) < 8.0 * 8.0)
+            .min_by(|a, b| mobs::dist2(&a.pos, &m.pos).total_cmp(&mobs::dist2(&b.pos, &m.pos)));
+        if let Some(p) = partner {
+            if mobs::dist2(&p.pos, &m.pos) < 1.6 * 1.6 {
+                // One of the two (the lower eid) has the baby.
+                if m.eid < p.eid {
+                    let at = [(m.pos[0] + p.pos[0]) / 2.0, m.pos[1].max(p.pos[1]), (m.pos[2] + p.pos[2]) / 2.0];
+                    actions.push(Action::Breed(m.dim, m.kind, at, (m.eid, p.eid), m.love_by, m.owner));
+                }
+                return Some((m.pos, 0.0));
+            }
+            mobs::face(m, p.pos);
+            return Some((p.pos, speed * 1.2));
+        }
+    }
+    // Someone holding its food: follow (keeping a couple of blocks away).
+    let food = seen
+        .iter()
+        .filter(|s| s.present && s.hands.iter().any(|h| is_food(m.kind, h)) && mobs::dist2(&s.pos, &m.pos) < 10.0 * 10.0)
+        .min_by(|a, b| mobs::dist2(&a.pos, &m.pos).total_cmp(&mobs::dist2(&b.pos, &m.pos)));
+    if let Some(s) = food {
+        mobs::face(m, s.pos);
+        if mobs::dist2(&s.pos, &m.pos) < 2.5 * 2.5 {
+            m.vel[0] = 0.0;
+            m.vel[2] = 0.0;
+            return Some((m.pos, 0.0));
+        }
+        return Some((mobs::follow_path(world, m, s.pos), speed * 1.2));
+    }
+    None
+}
+
+/// A tamed wolf: sits, fights its owner's enemies, follows the owner.
+fn tamed_wolf(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], actions: &mut Vec<Action>) -> Option<([f64; 3], f64)> {
+    let speed = m.kind.walk_speed();
+    if m.sitting {
+        m.vel[0] = 0.0;
+        m.vel[2] = 0.0;
+        m.prey = None;
+        return Some((m.pos, 0.0));
+    }
+    // Its owner's enemy.
+    if let Some(prey) = m.prey.and_then(|e| others.iter().find(|o| o.eid == e)).filter(|o| mobs::dist2(&o.pos, &m.pos) < 24.0 * 24.0) {
+        let d = mobs::dist2(&prey.pos, &m.pos).sqrt();
+        mobs::face(m, prey.pos);
+        if d < 1.8 && m.attack_cooldown == 0 {
+            m.attack_cooldown = 20;
+            actions.push(Action::HurtMob(prey.eid, 4.0, m.eid));
+        }
+        return Some((mobs::follow_path(world, m, prey.pos), speed * 1.4));
+    }
+    m.prey = None;
+    let owner = seen.iter().find(|s| Some(s.player.uuid) == m.owner)?;
+    let d = mobs::dist2(&owner.pos, &m.pos).sqrt();
+    if d > 12.0 {
+        // Left behind: appears next to the owner.
+        let a = entities::random() as f64 * std::f64::consts::TAU;
+        m.pos = [owner.pos[0] + a.cos() * 1.5, owner.pos[1], owner.pos[2] + a.sin() * 1.5];
+        m.vel = [0.0; 3];
+        m.path.clear();
+        return Some((m.pos, 0.0));
+    }
+    if d > 4.0 {
+        return Some((mobs::follow_path(world, m, owner.pos), speed * 1.4));
+    }
+    None
+}
+
+/// Right click on an animal. Returns whether something happened (so nothing else does).
+pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32, held: Option<&str>) -> bool {
+    let (gm, consume) = {
+        let st = player.state.lock().unwrap();
+        (st.game_mode, st.game_mode != 1)
+    };
+    if gm == 3 {
+        return false;
+    }
+    let use_one = |player: &Arc<Player>| {
+        if consume {
+            let mut st = player.state.lock().unwrap();
+            let h = st.held_slot;
+            let slot = st.inv.consume_held(hand, h, 1, None);
+            st.sync_slot(player, slot);
+        }
+    };
+    // Decided with the mobs locked; the item is used afterwards (never the player's lock
+    // inside the mobs' one).
+    let mut out: Vec<(Vec<u8>, bool)> = Vec::new();
+    let mut eat = false;
+    let done = {
+        let mut mobs_map = server.mobs.lock().unwrap();
+        let Some(m) = mobs_map.get_mut(&eid).filter(|m| m.death_ticks.is_none()) else { return false };
+        let mine = m.owner == Some(player.uuid);
+        match (m.kind, held) {
+            // Taming a wild wolf with a bone.
+            (MobKind::Wolf, Some("bone")) if m.owner.is_none() && m.angry == 0 => {
+                eat = true;
+                if entities::random() < 1.0 / 3.0 {
+                    m.owner = Some(player.uuid);
+                    m.sitting = true;
+                    m.target = None;
+                    m.health = m.max_health();
+                    out.push((status(m.eid, 7), true));
+                } else {
+                    out.push((status(m.eid, 6), true));
+                }
+                out.push((mobs::metadata(m), true));
+                true
+            }
+            // Own wolf: meat heals (or makes it fall in love), anything else sits / stands up.
+            (MobKind::Wolf, h) if mine => {
+                if h.is_some_and(is_meat) && m.health < m.max_health() {
+                    eat = true;
+                    m.health = (m.health + 4.0).min(m.max_health());
+                    out.push((mobs::metadata(m), true));
+                } else if h.is_some_and(is_meat) && m.grow == 0 && m.love == 0 {
+                    eat = true;
+                    m.love = LOVE;
+                    m.love_by = Some(player.eid);
+                } else {
+                    m.sitting = !m.sitting;
+                    m.path.clear();
+                    out.push((mobs::metadata(m), true));
+                }
+                true
+            }
+            (k, Some(h)) if breeds(k) && k != MobKind::Wolf && is_food(k, h) => {
+                if m.grow < 0 {
+                    // A baby grows 10% of what it has left.
+                    eat = true;
+                    m.grow += -m.grow / 10;
+                    out.push((status(m.eid, 18), true));
+                    true
+                } else if m.grow == 0 && m.love == 0 {
+                    eat = true;
+                    m.love = LOVE;
+                    m.love_by = Some(player.eid);
+                    out.push((status(m.eid, 18), true));
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    };
+    if eat {
+        use_one(player);
+    }
+    for (p, _) in out {
+        server.broadcast_tracked(eid, &p, true);
+    }
+    done
+}
+
+/// Two parents have a baby.
+pub fn breed(server: &Arc<Server>, dim: crate::world::Dimension, kind: MobKind, at: [f64; 3], parents: (i32, i32), by: Option<i32>, owner: Option<u128>) {
+    {
+        let mut mobs_map = server.mobs.lock().unwrap();
+        // Both still in love (the other may have bred meanwhile).
+        let ok = [parents.0, parents.1].iter().all(|e| mobs_map.get(e).is_some_and(|m| m.love > 0 && m.grow == 0 && m.death_ticks.is_none()));
+        if !ok {
+            return;
+        }
+        for e in [parents.0, parents.1] {
+            if let Some(m) = mobs_map.get_mut(&e) {
+                m.love = 0;
+                m.grow = COOLDOWN;
+            }
+        }
+    }
+    let baby = mobs::spawn(server, dim, kind, at);
+    if let Some(m) = server.mobs.lock().unwrap().get_mut(&baby) {
+        m.grow = BABY;
+        m.owner = owner;
+    }
+    let player = by.and_then(|e| server.players.read().unwrap().get(&e).cloned());
+    if player.is_some() {
+        entities::spawn_xp(server, dim, at, 1 + (entities::random() * 7.0) as i32);
+    }
+    let _ = player;
+}
+
+/// The owner hit `target` (or `target` hurt the owner): the owner's wolves go for it.
+pub fn sic(server: &Server, owner: u128, target: i32) {
+    let mut mobs_map = server.mobs.lock().unwrap();
+    if mobs_map.get(&target).is_some_and(|t| t.owner == Some(owner)) {
+        return;
+    }
+    for m in mobs_map.values_mut().filter(|m| m.kind == MobKind::Wolf && m.owner == Some(owner) && !m.sitting && m.death_ticks.is_none()) {
+        m.prey = Some(target);
+    }
+}

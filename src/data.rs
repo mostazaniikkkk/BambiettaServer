@@ -147,6 +147,11 @@ impl Registries {
         self.block(name).map_or(0, |b| b.default_state)
     }
 
+    /// Number of block states.
+    pub fn state_count(&self) -> usize {
+        self.state_to_block.len()
+    }
+
     pub fn block_of_state(&self, state: u16) -> &Block {
         &self.blocks[*self.state_to_block.get(state as usize).unwrap_or(&0) as usize]
     }

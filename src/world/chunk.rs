@@ -129,6 +129,15 @@ impl Blocks {
         }
     }
 
+    /// Whether some state of the section may satisfy `f` (exact for palettes; always for `Full`).
+    pub fn may_contain(&self, f: &dyn Fn(u16) -> bool) -> bool {
+        match self {
+            Blocks::Uniform(v) => f(*v),
+            Blocks::Nibble(p, _) | Blocks::Paletted(p, _) => p.iter().any(|&s| f(s)),
+            Blocks::Full(_) => true,
+        }
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = u16> + '_ {
         (0..4096).map(move |i| self.get(i))
     }
@@ -234,13 +243,16 @@ pub struct Chunk {
     tops: Option<Box<[u16; 256]>>,
     /// Last unload round in which it was used (water, redstone, mobs... near nobody).
     pub used: u64,
+    /// Changes on every block or block-entity change (to know whether a packet built outside the
+    /// world lock is still valid).
+    pub version: u64,
 }
 
 impl Chunk {
     /// Empty column `height` blocks tall starting at `min_y`.
     pub fn new_dim(min_y: i32, height: i32, biome: u8) -> Self {
         let n = (height / 16) as usize;
-        Self { min_y, sections: vec![Section::new(biome); n], block_entities: Default::default(), dirty: false, cache: None, faces: None, tops: None, used: 0 }
+        Self { min_y, sections: vec![Section::new(biome); n], block_entities: Default::default(), dirty: false, cache: None, faces: None, tops: None, used: 0, version: 0 }
     }
 
     /// Empty Overworld column.
@@ -253,6 +265,23 @@ impl Chunk {
     }
 
     /// Local coordinates: x,z in 0..16, absolute y.
+    /// Random ticks: `n` random blocks per section, keeping those `wanted` as (x, y, z, state)
+    /// (sections with nothing wanted in their palette are skipped).
+    pub fn random_blocks(&self, n: usize, wanted: &dyn Fn(u16) -> bool, rnd: &mut dyn FnMut() -> u32, out: &mut Vec<(usize, i32, usize, u16)>) {
+        for (i, s) in self.sections.iter().enumerate() {
+            if !s.blocks.may_contain(wanted) {
+                continue;
+            }
+            for _ in 0..n {
+                let r = rnd() as usize & 4095;
+                let state = s.blocks.get(r);
+                if wanted(state) {
+                    out.push((r & 15, self.min_y + (i as i32) * 16 + (r >> 8) as i32, (r >> 4) & 15, state));
+                }
+            }
+        }
+    }
+
     pub fn get(&self, x: usize, y: i32, z: usize) -> u16 {
         let ry = y - self.min_y;
         if ry < 0 || ry >= self.height() {
@@ -274,6 +303,7 @@ impl Chunk {
             self.cache = None;
             self.faces = None;
             self.tops = None;
+            self.version += 1;
         }
         old
     }
@@ -293,26 +323,50 @@ impl Chunk {
         }
     }
 
-    /// `map_chunk` packet (unframed body) for the column at (cx, cz).
-    /// `neighbors`: edge light of the north, south, west and east chunks.
-    pub fn packet(&mut self, cx: i32, cz: i32, has_sky: bool, neighbors: [Option<Arc<LightFaces>>; 4]) -> Arc<Vec<u8>> {
-        use std::io::{Read, Write};
-        if let Some(c) = &self.cache {
-            let mut out = Vec::with_capacity(c.0);
-            if flate2::read::ZlibDecoder::new(&c.1[..]).read_to_end(&mut out).is_ok() && out.len() == c.0 {
-                return Arc::new(out);
-            }
-        }
-        let p = self.encode(cx, cz, has_sky, &neighbors);
+
+    /// The stored packet, if any (decompressed).
+    pub fn cached_packet(&self) -> Option<Arc<Vec<u8>>> {
+        use std::io::Read;
+        let c = self.cache.as_ref()?;
+        let mut out = Vec::with_capacity(c.0);
+        (flate2::read::ZlibDecoder::new(&c.1[..]).read_to_end(&mut out).is_ok() && out.len() == c.0).then(|| Arc::new(out))
+    }
+
+    /// Builds the packet without touching the chunk: (packet, own edge light, compressed copy
+    /// to store). Can run on a copy, outside the world lock.
+    #[allow(clippy::type_complexity)]
+    pub fn build_packet(&self, cx: i32, cz: i32, has_sky: bool, neighbors: &[Option<Arc<LightFaces>>; 4]) -> (Arc<Vec<u8>>, Arc<LightFaces>, Option<Arc<(usize, Vec<u8>)>>) {
+        use std::io::Write;
+        let (p, faces) = self.encode(cx, cz, has_sky, neighbors);
         // Stored compressed: the packet carries light for 26 sections (~110 KB) and most of it
         // repeats; compressed it is about 10 times smaller.
         let mut enc = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
-        if enc.write_all(&p).is_ok() {
-            if let Ok(z) = enc.finish() {
-                self.cache = Some(Arc::new((p.len(), z)));
-            }
+        let cache = enc.write_all(&p).ok().and_then(|_| enc.finish().ok()).map(|z| Arc::new((p.len(), z)));
+        (Arc::new(p), Arc::new(faces), cache)
+    }
+
+    /// Stores the results computed on a copy, if the chunk has not changed since.
+    pub fn store(&mut self, version: u64, faces: Option<Arc<LightFaces>>, cache: Option<Arc<(usize, Vec<u8>)>>) {
+        if self.version != version {
+            return;
         }
-        Arc::new(p)
+        if faces.is_some() {
+            self.faces = faces;
+        }
+        if cache.is_some() {
+            self.cache = cache;
+        }
+    }
+
+    /// Own edge light if already computed.
+    pub fn known_faces(&self) -> Option<Arc<LightFaces>> {
+        self.faces.clone()
+    }
+
+    /// Computes the own edge light without touching the chunk.
+    pub fn compute_faces(&self, has_sky: bool) -> Arc<LightFaces> {
+        let (sky, block) = self.compute_light(has_sky);
+        Arc::new(faces_of(&sky, &block, self.height() as usize))
     }
 
     /// Frees whatever can be recomputed (packet and edge light).
@@ -337,16 +391,6 @@ impl Chunk {
         blocks + cache + faces + if self.tops.is_some() { 512 } else { 0 }
     }
 
-    /// Own edge light (computed once and kept until a block changes).
-    pub fn faces(&mut self, has_sky: bool) -> Arc<LightFaces> {
-        if let Some(f) = &self.faces {
-            return f.clone();
-        }
-        let (sky, block) = self.compute_light(has_sky);
-        let f = Arc::new(faces_of(&sky, &block, self.height() as usize));
-        self.faces = Some(f.clone());
-        f
-    }
 
     /// Y of the highest (non-air) block in local column (x, z); `min_y - 1` if none.
     pub fn top_y(&mut self, x: usize, z: usize) -> i32 {
@@ -367,7 +411,7 @@ impl Chunk {
         heights
     }
 
-    fn encode(&mut self, cx: i32, cz: i32, has_sky: bool, neighbors: &[Option<Arc<LightFaces>>; 4]) -> Vec<u8> {
+    fn encode(&self, cx: i32, cz: i32, has_sky: bool, neighbors: &[Option<Arc<LightFaces>>; 4]) -> (Vec<u8>, LightFaces) {
         let reg = data::get();
         let mut out = packet(id::play::MAP_CHUNK);
         out.i32(cx).i32(cz);
@@ -429,10 +473,10 @@ impl Chunk {
         }
 
         let (mut sky, mut block) = self.compute_light(has_sky);
-        self.faces = Some(Arc::new(faces_of(&sky, &block, self.height() as usize)));
+        let faces = faces_of(&sky, &block, self.height() as usize);
         self.light_from_neighbors(&mut sky, &mut block, neighbors);
         write_light(&mut out, &sky, &block, self.sections.len(), has_sky);
-        out
+        (out, faces)
     }
 
     fn filters(&self) -> Vec<u8> {
@@ -733,7 +777,7 @@ mod tests {
             }
         }
         a.set(15, 2, 8, glow);
-        let fa = a.faces(true);
+        let fa = a.compute_faces(true);
         let (_, mut block) = b.compute_light(true);
         let (mut sky, _) = b.compute_light(true);
         assert_eq!(block[index(0, (2 - MIN_Y) as usize, 8)], 0, "sin vecinos no llega luz");

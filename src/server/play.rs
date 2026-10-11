@@ -37,18 +37,16 @@ pub async fn run(server: Arc<Server>, mut conn: Conn, login: Login) -> Result<()
         dim_index: std::sync::atomic::AtomicU8::new(dim.index() as u8),
         tracked: Mutex::new(Default::default()),
     });
-    {
-        let mut players = server.players.write().unwrap();
-        if players.values().any(|p| p.name.eq_ignore_ascii_case(&player.name)) {
-            drop(players);
-            player.kick("§cYa hay un jugador conectado con ese nombre");
-            return Ok(());
-        }
-        players.insert(player.eid, player.clone());
+    if server.players.read().unwrap().values().any(|p| p.name.eq_ignore_ascii_case(&player.name)) {
+        player.kick("§cYa hay un jugador conectado con ese nombre");
+        return Ok(());
     }
     info!("{} entró ({} desde {}, eid {})", player.name, conn.transport, conn.peer, player.eid);
 
-    join(&server, &player).await;
+    if !join(&server, &player).await {
+        player.kick("§cYa hay un jugador conectado con ese nombre");
+        return Ok(());
+    }
     conn.reader.max_per_second = server.config.max_packets_per_second;
     let result = play_loop(&server, &player, &mut conn).await;
     if let Err(e) = &result {
@@ -81,7 +79,8 @@ pub async fn run(server: Arc<Server>, mut conn: Conn, login: Login) -> Result<()
     result
 }
 
-async fn join(server: &Arc<Server>, player: &Arc<Player>) {
+/// Sends the join sequence. Returns false if someone with the same name got in meanwhile.
+async fn join(server: &Arc<Server>, player: &Arc<Player>) -> bool {
     let cfg = &server.config;
     let (game_mode, vd, x, y, z, yaw, pitch, held) = {
         let s = player.state.lock().unwrap();
@@ -99,6 +98,15 @@ async fn join(server: &Arc<Server>, player: &Arc<Player>) {
     p.bool(false).bool(dim == crate::world::Dimension::Overworld && matches!(cfg.generation.name.as_str(), "flat" | "superflat"));
     p.bool(false).varint(0);
     player.send(p);
+    // Only now does it join the player list: before the login packet, a broadcast (a block
+    // change, a mob) would reach a client that is not in the game yet.
+    {
+        let mut players = server.players.write().unwrap();
+        if players.values().any(|p| p.name.eq_ignore_ascii_case(&player.name)) {
+            return false;
+        }
+        players.insert(player.eid, player.clone());
+    }
 
     let mut p = packet(id::play::DIFFICULTY);
     p.u8(cfg.difficulty.min(3)).bool(false);
@@ -151,8 +159,10 @@ async fn join(server: &Arc<Server>, player: &Arc<Player>) {
         player.send(super::experience::packet_for(&st));
     }
     super::effects::resend(player);
+    super::weather::send_state(server, player);
     server.broadcast_message(&format!("§e{} entró al juego", player.name));
     player.message("§dBienvenido a Bambietta§7 · usa §e/help");
+    true
 }
 
 async fn play_loop(server: &Arc<Server>, player: &Arc<Player>, conn: &mut Conn) -> Result<()> {
@@ -580,6 +590,7 @@ fn window_click(server: &Arc<Server>, player: &Arc<Player>, r: &mut Reader) -> R
 
 async fn moved(server: &Arc<Server>, player: &Arc<Player>, pos: Option<[f64; 3]>, look: Option<(f32, f32)>, _claimed_ground: bool) {
     let mut fall_damage = 0.0f32;
+    let mut landed = 0.0f64;
     let mut setback = None;
     let (x, y, z, yaw, pitch, on_ground) = {
         let mut st = player.state.lock().unwrap();
@@ -625,6 +636,7 @@ async fn moved(server: &Arc<Server>, player: &Arc<Player>, pos: Option<[f64; 3]>
                             if st.fall_distance > 3.0 {
                                 fall_damage = ((st.fall_distance - 3.0).ceil() * env.fall_factor) as f32;
                             }
+                            landed = st.fall_distance;
                             st.fall_distance = 0.0;
                         } else if dy < 0.0 {
                             st.fall_distance -= dy;
@@ -643,6 +655,10 @@ async fn moved(server: &Arc<Server>, player: &Arc<Player>, pos: Option<[f64; 3]>
     }
     if fall_damage > 0.0 {
         health::damage(server, player, fall_damage, "fall", None);
+    }
+    // Jumping or falling onto farmland tramples it.
+    if landed > 0.5 {
+        super::farming::trample(server, player, landed, [x, y, z]);
     }
     let mut p = packet(id::play::ENTITY_TELEPORT);
     p.varint(player.eid).f64(x).f64(y).f64(z).angle(yaw).angle(pitch).bool(on_ground);
@@ -784,8 +800,29 @@ pub async fn update_view(server: &Arc<Server>, player: &Arc<Player>, force: bool
         let srv = server.clone();
         let batch = batch.to_vec();
         let packets = tokio::task::spawn_blocking(move || {
-            let mut w = srv.world(dim).lock().unwrap();
-            batch.iter().map(|&(x, z)| w.chunk_packet(x, z)).collect::<Vec<_>>()
+            // Loading and generating are the slow part: done without the world lock (and on several
+            // threads), so the game tick does not wait for them. The packet also needs the
+            // neighbors' border light, so they are produced too.
+            let mut need: Vec<(i32, i32)> = batch.iter().flat_map(|&(x, z)| [(x, z), (x + 1, z), (x - 1, z), (x, z + 1), (x, z - 1)]).collect();
+            need.sort_unstable();
+            need.dedup();
+            let (source, missing) = {
+                let w = srv.world(dim).lock().unwrap();
+                (w.source(), w.missing(&need))
+            };
+            let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 8);
+            let per = missing.len().div_ceil(threads).max(1);
+            let produced: Vec<((i32, i32), crate::world::chunk::Chunk)> = std::thread::scope(|s| {
+                let handles: Vec<_> = missing.chunks(per).map(|part| s.spawn(|| part.iter().map(|&(x, z)| ((x, z), source.produce(x, z))).collect::<Vec<_>>())).collect();
+                handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+            });
+            {
+                let mut w = srv.world(dim).lock().unwrap();
+                for ((x, z), c) in produced {
+                    w.insert(x, z, c);
+                }
+            }
+            crate::world::World::packets_outside_lock(srv.world(dim), &batch)
         })
         .await
         .unwrap();

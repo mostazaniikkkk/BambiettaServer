@@ -160,7 +160,7 @@ await step('cofre', async () => {
   again.close(); await sleep(300)
   await a.equip(find(a, 'diamond_pickaxe'), 'hand')
   await a.dig(a.blockAt(p))
-  await sleep(800)
+  await sleep(300) // before the 0.5 s pickup delay: the bot is standing right there
   const near = Object.values(a.entities).filter(e => e.name === 'item' && e.position.distanceTo(p) < 3)
   check(near.length >= 2, `romper el cofre suelta su contenido (${near.length} ítems)`)
 })

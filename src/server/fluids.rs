@@ -465,6 +465,42 @@ mod tests {
         assert_eq!(fluid_at(&mut w, BlockPos::new(3, -60, 0)), None);
     }
 
+    /// Cost of a fluid update: water spilling down a staircase (`cargo test --release -- --ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn bench_updates() {
+        let mut w = flat_world();
+        let stone = data::get().state("stone");
+        // A 16-step staircase going down in every direction from (0, -44, 0).
+        for step in 0..16 {
+            let y = -45 - step;
+            for x in -(step + 1)..=(step + 1) {
+                for z in -(step + 1)..=(step + 1) {
+                    w.set_block(BlockPos::new(x, y, z), stone);
+                }
+            }
+        }
+        let src = BlockPos::new(0, -44, 0);
+        w.set_block(src, state_for(Kind::Water, 0));
+        let mut queue = vec![src];
+        let mut updates = 0usize;
+        let t = std::time::Instant::now();
+        for _ in 0..400 {
+            if queue.is_empty() {
+                break;
+            }
+            let mut changes = Vec::new();
+            let mut follow = Vec::new();
+            for p in std::mem::take(&mut queue) {
+                update(&mut w, p, &mut changes, &mut follow);
+                updates += 1;
+            }
+            queue = follow.into_iter().map(|f| f.0).collect::<HashSet<_>>().into_iter().collect();
+        }
+        let e = t.elapsed();
+        println!("{updates} updates in {e:?} ({:.1} µs/update)", e.as_secs_f64() * 1e6 / updates as f64);
+    }
+
     #[test]
     fn lava_and_water_make_obsidian() {
         let mut w = flat_world();

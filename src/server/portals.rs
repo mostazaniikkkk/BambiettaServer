@@ -437,6 +437,7 @@ pub async fn change_dimension(server: &Arc<Server>, player: &Arc<Player>, dim: D
     player.send(xp);
     // The client creates a new player: its effects must be resent.
     super::effects::resend(player);
+    super::weather::send_state(server, player);
     player.send(super::update_time(server.age.load(Ordering::Relaxed), server.day_time.load(Ordering::Relaxed)));
     let mut ev = packet(id::play::GAME_STATE_CHANGE);
     ev.u8(13).f32(0.0);

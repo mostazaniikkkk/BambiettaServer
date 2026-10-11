@@ -384,6 +384,8 @@ pub struct LevelInfo {
     pub day_time: i64,
     /// `DragonFight.DragonKilled` (worlds without saved fight data: no).
     pub dragon_killed: bool,
+    /// (raining, rainTime, thundering, thunderTime, clearWeatherTime).
+    pub weather: (bool, i32, bool, i32, i32),
 }
 
 pub fn read_level(dir: &Path) -> Option<LevelInfo> {
@@ -397,11 +399,13 @@ pub fn read_level(dir: &Path) -> Option<LevelInfo> {
         _ => None,
     };
     let dragon_killed = d.get("DragonFight").and_then(|f| f.get_i64("DragonKilled")).unwrap_or(0) != 0;
-    Some(LevelInfo { spawn, time: d.get_i64("Time").unwrap_or(0), day_time: d.get_i64("DayTime").unwrap_or(1000), dragon_killed })
+    let int = |k: &str| d.get_i64(k).unwrap_or(0);
+    let weather = (int("raining") != 0, int("rainTime") as i32, int("thundering") != 0, int("thunderTime") as i32, int("clearWeatherTime") as i32);
+    Some(LevelInfo { spawn, time: d.get_i64("Time").unwrap_or(0), day_time: d.get_i64("DayTime").unwrap_or(1000), dragon_killed, weather })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn write_level(dir: &Path, name: &str, seed: i64, spawn: BlockPos, time: i64, day_time: i64, game_mode: u8, difficulty: u8, dragon: (bool, bool)) -> Result<()> {
+pub fn write_level(dir: &Path, name: &str, seed: i64, spawn: BlockPos, time: i64, day_time: i64, game_mode: u8, difficulty: u8, dragon: (bool, bool), weather: (bool, i32, bool, i32, i32)) -> Result<()> {
     let dims = ["overworld", "the_nether", "the_end"]
         .iter()
         .map(|d| {
@@ -431,8 +435,11 @@ pub fn write_level(dir: &Path, name: &str, seed: i64, spawn: BlockPos, time: i64
         .with("hardcore", Nbt::Byte(0))
         .with("allowCommands", Nbt::Byte(1))
         .with("initialized", Nbt::Byte(1))
-        .with("raining", Nbt::Byte(0))
-        .with("thundering", Nbt::Byte(0))
+        .with("raining", Nbt::Byte(weather.0 as i8))
+        .with("rainTime", Nbt::Int(weather.1))
+        .with("thundering", Nbt::Byte(weather.2 as i8))
+        .with("thunderTime", Nbt::Int(weather.3))
+        .with("clearWeatherTime", Nbt::Int(weather.4))
         .with("LastPlayed", Nbt::Long(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64))
         .with("DragonFight", Nbt::compound().with("DragonKilled", Nbt::Byte(dragon.0 as i8)).with("PreviouslyKilled", Nbt::Byte(dragon.1 as i8)).with("NeedsStateScanning", Nbt::Byte(0)))
         .with("DataPacks", Nbt::compound().with("Enabled", Nbt::List(vec![Nbt::str("vanilla")])).with("Disabled", Nbt::List(vec![])))
@@ -482,9 +489,10 @@ mod tests {
         // Rewriting the region preserves the other chunk.
         write_chunks(&dir, vec![((-31, 7), chunk_to_nbt(&back, -31, 7))]).unwrap();
         assert!(read_chunk(&dir, -30, 7).unwrap().is_some());
-        write_level(&dir, "Prueba", 42, BlockPos::new(1, 70, 2), 100, 6000, 0, 1, (true, true)).unwrap();
+        write_level(&dir, "Prueba", 42, BlockPos::new(1, 70, 2), 100, 6000, 0, 1, (true, true), (true, 5000, false, 9000, 0)).unwrap();
         let l = read_level(&dir).unwrap();
         assert_eq!((l.spawn, l.day_time), (Some(BlockPos::new(1, 70, 2)), 6000));
+        assert_eq!(l.weather, (true, 5000, false, 9000, 0));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

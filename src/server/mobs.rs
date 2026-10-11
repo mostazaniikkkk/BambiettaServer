@@ -12,7 +12,11 @@ use crate::item::ItemStack;
 use crate::protocol::{id, packet, BlockPos, Writer};
 use crate::world::physics::{move_aabb, Aabb};
 use crate::world::{Dimension, World};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// Path searches left in this tick (they are the expensive part of the AI; the rest wait a tick).
+static PATH_BUDGET: AtomicU32 = AtomicU32::new(0);
+const PATHS_PER_TICK: u32 = 2;
 use std::sync::Arc;
 
 /// Maximum monsters and animals near each player.
@@ -42,9 +46,11 @@ pub enum MobKind {
     Endermite,
     EnderDragon,
     EndCrystal,
+    Pillager,
+    Wolf,
 }
 
-pub const ALL: [MobKind; 21] = [
+pub const ALL: [MobKind; 23] = [
     MobKind::Cow,
     MobKind::Pig,
     MobKind::Sheep,
@@ -66,6 +72,8 @@ pub const ALL: [MobKind; 21] = [
     MobKind::Endermite,
     MobKind::EnderDragon,
     MobKind::EndCrystal,
+    MobKind::Pillager,
+    MobKind::Wolf,
 ];
 
 impl MobKind {
@@ -92,6 +100,8 @@ impl MobKind {
             MobKind::Endermite => "endermite",
             MobKind::EnderDragon => "ender_dragon",
             MobKind::EndCrystal => "end_crystal",
+            MobKind::Pillager => "pillager",
+            MobKind::Wolf => "wolf",
         }
     }
 
@@ -122,6 +132,8 @@ impl MobKind {
             MobKind::Endermite => "Endermite",
             MobKind::EnderDragon => "Dragón del End",
             MobKind::EndCrystal => "Cristal del End",
+            MobKind::Pillager => "Saqueador",
+            MobKind::Wolf => "Lobo",
         }
     }
 
@@ -142,6 +154,7 @@ impl MobKind {
                 | MobKind::Hoglin
                 | MobKind::Enderman
                 | MobKind::Endermite
+                | MobKind::Pillager
         )
     }
 
@@ -156,7 +169,7 @@ impl MobKind {
             MobKind::Pig => (0.9, 0.9),
             MobKind::Sheep => (0.9, 1.3),
             MobKind::Chicken => (0.4, 0.7),
-            MobKind::Zombie | MobKind::Villager | MobKind::ZombifiedPiglin | MobKind::Piglin => (0.6, 1.95),
+            MobKind::Zombie | MobKind::Villager | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::Pillager => (0.6, 1.95),
             MobKind::Skeleton => (0.6, 1.99),
             MobKind::Creeper => (0.6, 1.7),
             MobKind::Spider => (1.4, 0.9),
@@ -168,6 +181,7 @@ impl MobKind {
             MobKind::Strider => (0.9, 1.7),
             MobKind::Enderman => (0.6, 2.9),
             MobKind::Endermite => (0.4, 0.3),
+            MobKind::Wolf => (0.6, 0.85),
             MobKind::EnderDragon => (16.0, 8.0),
             MobKind::EndCrystal => (2.0, 2.0),
         }
@@ -179,6 +193,8 @@ impl MobKind {
             MobKind::Sheep | MobKind::Endermite => 8.0,
             MobKind::Chicken => 4.0,
             MobKind::Spider | MobKind::Piglin => 16.0,
+            MobKind::Pillager => 24.0,
+            MobKind::Wolf => 8.0,
             MobKind::Hoglin | MobKind::Enderman => 40.0,
             MobKind::EnderDragon => 200.0,
             MobKind::EndCrystal => 1.0,
@@ -194,9 +210,15 @@ impl MobKind {
             MobKind::Zombie | MobKind::Creeper | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::Endermite => 0.08,
             MobKind::Skeleton | MobKind::WitherSkeleton | MobKind::Hoglin => 0.09,
             MobKind::Enderman => 0.1,
+            MobKind::Pillager => 0.12,
+            MobKind::Wolf => 0.1,
             MobKind::Villager | MobKind::Strider | MobKind::Ghast => 0.05,
             _ => 0.07,
         }
+    }
+
+    pub fn walk_speed(self) -> f64 {
+        self.speed()
     }
 
     pub fn undead(self) -> bool {
@@ -235,6 +257,7 @@ impl MobKind {
     fn melee(self) -> f32 {
         match self {
             MobKind::Zombie => 3.0,
+            MobKind::Wolf => 4.0,
             MobKind::Spider | MobKind::Endermite => 2.0,
             MobKind::ZombifiedPiglin | MobKind::Piglin => 5.0,
             MobKind::WitherSkeleton => 8.0,
@@ -285,11 +308,50 @@ pub struct Mob {
     pub busy: u32,
     pub villager: Option<Box<super::villagers::VillagerData>>,
     pub dragon: Option<Box<super::dragon::DragonState>>,
+    /// Walking around an obstacle it cannot jump: horizontal direction and ticks left.
+    pub detour: Option<([f64; 2], u32)>,
+    /// Cells left on the way to the target (A*), the target cell it was computed for and
+    /// ticks until it may be recomputed.
+    pub path: std::collections::VecDeque<BlockPos>,
+    pub path_goal: Option<BlockPos>,
+    pub path_wait: u32,
+    /// Closest it has got to the next waypoint, and ticks without getting closer.
+    pub path_best: f64,
+    pub path_stuck: u32,
+    /// Skeleton: ticks drawing the bow; side it circles around the player (+1/-1).
+    pub drawing: u32,
+    pub strafe: f64,
+    /// Undead: whether it is under the open sky (refreshed every few ticks) and the shaded cell
+    /// it is heading to before the sun comes up.
+    pub exposed: bool,
+    pub shade: Option<BlockPos>,
+    /// Pillager patrol it belongs to (0: none) and whether it is its captain.
+    pub patrol: u32,
+    pub captain: bool,
+    /// Creeper struck by lightning (bigger explosion).
+    pub charged: bool,
+    /// Skeleton on hard: where the player was last tick, how fast it is closing in, and the
+    /// cover / peek spots it is using.
+    pub last_target: Option<[f64; 3]>,
+    pub approach: f64,
+    pub cover: Option<(BlockPos, BlockPos)>,
+    /// Animals: age like vanilla's `Age` (negative: baby; positive: breeding cooldown), ticks
+    /// in love and the player who fed it.
+    pub grow: i32,
+    pub love: u32,
+    pub love_by: Option<i32>,
+    /// Tamed wolf: owner's UUID, sitting, and the mob it is attacking for its owner.
+    pub owner: Option<u128>,
+    pub sitting: bool,
+    pub prey: Option<i32>,
 }
 
 impl Mob {
     pub fn size(&self) -> (f64, f64) {
         let (w, h) = self.kind.base_size();
+        if self.grow < 0 {
+            return (w * 0.5, h * 0.5);
+        }
         if self.kind == MobKind::MagmaCube {
             (w * self.size as f64 * 2.0 * 0.5 + 0.0, h * self.size as f64 * 2.0 * 0.5)
         } else {
@@ -298,12 +360,21 @@ impl Mob {
     }
 
     pub fn max_health(&self) -> f32 {
-        if self.kind == MobKind::MagmaCube { (self.size * self.size) as f32 } else { self.kind.base_health() }
+        match self.kind {
+            MobKind::MagmaCube => (self.size * self.size) as f32,
+            MobKind::Wolf if self.owner.is_some() => 20.0,
+            k => k.base_health(),
+        }
     }
 
     fn aabb(&self) -> Aabb {
         let (w, h) = self.size();
         Aabb::entity(self.pos[0], self.pos[1], self.pos[2], w, h)
+    }
+
+    /// Drawing the bow or loading the crossbow (arm raised).
+    fn charging(&self) -> bool {
+        self.drawing > 0 && (self.kind != MobKind::Pillager || self.drawing < 25)
     }
 
     pub fn center(&self) -> [f64; 3] {
@@ -315,9 +386,13 @@ impl Mob {
 // ---------- packets ----------
 
 fn equipment(eid: i32, slot: u8, item: &str) -> Vec<u8> {
+    equipment_stack(eid, slot, data::get().item_id(item).map(|b| ItemStack::new(b, 1)))
+}
+
+pub(super) fn equipment_stack(eid: i32, slot: u8, stack: Option<ItemStack>) -> Vec<u8> {
     let mut e = packet(id::play::ENTITY_EQUIPMENT);
     e.varint(eid).u8(slot);
-    crate::item::write_slot(&mut e, &data::get().item_id(item).map(|b| ItemStack::new(b, 1)));
+    crate::item::write_slot(&mut e, &stack);
     e
 }
 
@@ -334,6 +409,12 @@ fn spawn_packets(m: &Mob) -> Vec<Vec<u8>> {
         MobKind::Skeleton => out.push(equipment(m.eid, 0, "bow")),
         MobKind::WitherSkeleton => out.push(equipment(m.eid, 0, "stone_sword")),
         MobKind::Piglin | MobKind::ZombifiedPiglin => out.push(equipment(m.eid, 0, "golden_sword")),
+        MobKind::Pillager => {
+            out.push(equipment(m.eid, 0, "crossbow"));
+            if m.captain {
+                out.push(equipment_stack(m.eid, 5, super::pillagers::ominous_banner()));
+            }
+        }
         _ => {}
     }
     if m.admire > 0 {
@@ -351,10 +432,18 @@ pub fn metadata(m: &Mob) -> Vec<u8> {
         // 9: health, 15: mob flags (aggressive = arms raised).
         p.u8(9).varint(3).f32(m.health.max(0.0));
         p.u8(15).varint(0).i8(if m.target.is_some() { 0x04 } else { 0 });
+        // 8: hand states (drawing the bow).
+        p.u8(8).varint(0).i8(if m.charging() { 0x01 } else { 0 });
+        // 16: baby (animals).
+        if super::animals::breeds(m.kind) {
+            p.u8(16).varint(8).bool(m.grow < 0);
+        }
     }
     match m.kind {
         MobKind::Creeper => {
             p.u8(16).varint(1).varint(if m.fuse.is_some() { 1 } else { -1 });
+            // 17: charged.
+            p.u8(17).varint(8).bool(m.charged);
         }
         MobKind::Sheep => {
             p.u8(17).varint(0).i8(if m.sheared { 0x10 } else { 0 });
@@ -381,6 +470,25 @@ pub fn metadata(m: &Mob) -> Vec<u8> {
         }
         MobKind::EndCrystal => {
             p.u8(9).varint(8).bool(true);
+        }
+        MobKind::Pillager => {
+            // 17: loading the crossbow.
+            p.u8(17).varint(8).bool(m.charging());
+        }
+        MobKind::Wolf => {
+            // 17: sitting / tamed, 18: owner, 20: collar colour (red), 21: anger.
+            p.u8(17).varint(0).i8(if m.sitting { 0x01 } else { 0 } | if m.owner.is_some() { 0x04 } else { 0 });
+            p.u8(18).varint(13);
+            match m.owner {
+                Some(u) => {
+                    p.bool(true).uuid(u);
+                }
+                None => {
+                    p.bool(false);
+                }
+            }
+            p.u8(20).varint(1).varint(14);
+            p.u8(21).varint(1).varint(if m.angry > 0 { m.angry as i32 } else { 0 });
         }
         _ => {}
     }
@@ -451,6 +559,28 @@ pub fn spawn(server: &Server, dim: Dimension, kind: MobKind, pos: [f64; 3]) -> i
         busy: 0,
         villager: None,
         dragon: None,
+        detour: None,
+        path: Default::default(),
+        path_goal: None,
+        path_wait: 0,
+        path_best: f64::MAX,
+        path_stuck: 0,
+        drawing: 0,
+        strafe: 1.0,
+        exposed: false,
+        shade: None,
+        patrol: 0,
+        captain: false,
+        charged: false,
+        last_target: None,
+        approach: 0.0,
+        cover: None,
+        grow: 0,
+        love: 0,
+        love_by: None,
+        owner: None,
+        sitting: false,
+        prey: None,
     };
     match kind {
         MobKind::MagmaCube => {
@@ -497,6 +627,25 @@ struct SavedMob {
     size: Option<i32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     villager: Option<super::villagers::SavedVillager>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    patrol: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    captain: bool,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    grow: i32,
+    /// Tamed wolf's owner (UUID in hex).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    sitting: bool,
+}
+
+fn is_zero_i32(v: &i32) -> bool {
+    *v == 0
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 fn mobs_file(server: &Server) -> std::path::PathBuf {
@@ -520,6 +669,11 @@ pub fn save(server: &Server) {
             sheared: m.sheared,
             size: (m.kind == MobKind::MagmaCube).then_some(m.size),
             villager: m.villager.as_ref().map(|v| v.save()),
+            patrol: m.patrol,
+            captain: m.captain,
+            grow: m.grow,
+            owner: m.owner.map(|u| format!("{u:032x}")),
+            sitting: m.sitting,
         })
         .collect();
     let path = mobs_file(server);
@@ -547,6 +701,14 @@ pub fn load(server: &Server) {
             }
             m.health = s.health.clamp(0.5, m.max_health());
             m.sheared = s.sheared;
+            m.patrol = s.patrol;
+            m.captain = s.captain;
+            m.grow = s.grow;
+            m.owner = s.owner.as_deref().and_then(|u| u128::from_str_radix(u, 16).ok());
+            m.sitting = s.sitting;
+            if m.owner.is_some() {
+                m.health = s.health.clamp(0.5, m.max_health());
+            }
             if let Some(v) = s.villager {
                 m.villager = Some(Box::new(super::villagers::VillagerData::load(v)));
             }
@@ -568,6 +730,14 @@ pub struct Seen {
     pub targetable: bool,
     pub gold_armor: bool,
     pub pumpkin: bool,
+    /// Holds a bow or crossbow; carries a shield; has the shield raised.
+    pub archer: bool,
+    pub shield: bool,
+    pub shield_up: bool,
+    /// Items in the main and off hand.
+    pub hands: [&'static str; 2],
+    /// Alive and not a spectator (creative players count: animals follow them).
+    pub present: bool,
 }
 
 /// Effects applied outside the mobs/world locks.
@@ -582,6 +752,10 @@ pub enum Action {
     Barter(Dimension, [f64; 3]),
     Meta(Vec<u8>, i32),
     Xp(Dimension, [f64; 3], i32),
+    /// Two animals have a baby: (dimension, kind, where, parents, player who fed them, owner).
+    Breed(Dimension, MobKind, [f64; 3], (i32, i32), Option<i32>, Option<u128>),
+    /// A mob bites another mob: (target, damage, attacker).
+    HurtMob(i32, f32, i32),
 }
 
 pub fn difficulty_damage(server: &Server, base: f32) -> f32 {
@@ -626,6 +800,11 @@ fn seen_players(server: &Server) -> Vec<Seen> {
             let (yaw, pitch) = (s.yaw.to_radians() as f64, s.pitch.to_radians() as f64);
             let gold = (5..=8).any(|i| s.inv.slots[i].as_ref().is_some_and(|it| it.name().starts_with("golden_")));
             let pumpkin = s.inv.slots[5].as_ref().is_some_and(|it| it.name() == "carved_pumpkin");
+            let holds = |f: &dyn Fn(&str) -> bool| (0..2).any(|h| s.inv.held(h, s.held_slot).as_ref().is_some_and(|it| f(it.name())));
+            let archer = holds(&|n| n == "bow" || n == "crossbow");
+            let shield = holds(&|n| n == "shield");
+            let shield_up = s.using.as_ref().is_some_and(|u| matches!(u.kind, super::ranged::UseKind::Shield));
+            let hands = [0, 1].map(|h| s.inv.held(h, s.held_slot).as_ref().map_or("", |it| it.name()));
             let seen = Seen {
                 dim: p.dim(),
                 player: p.clone(),
@@ -635,6 +814,11 @@ fn seen_players(server: &Server) -> Vec<Seen> {
                 targetable: !s.dead && s.survival_like(),
                 gold_armor: gold,
                 pumpkin,
+                archer,
+                shield,
+                shield_up,
+                hands,
+                present: !s.dead && s.game_mode != 3,
             };
             drop(s);
             seen
@@ -647,8 +831,12 @@ pub fn tick(server: &Arc<Server>, age: i64) {
     if age % 20 == 0 {
         natural_spawn(server, &seen, age);
     }
+    if age % 1200 == 600 {
+        super::pillagers::natural_patrols(server, &seen);
+    }
     super::dragon::tick_fight(server, &seen, age);
 
+    PATH_BUDGET.store(PATHS_PER_TICK, Ordering::Relaxed);
     let mut actions = Vec::new();
     let mut packets: Vec<(i32, Vec<u8>)> = Vec::new();
     let day = is_day(server);
@@ -666,6 +854,8 @@ pub fn tick(server: &Arc<Server>, age: i64) {
             }
             let mut world = server.world(dim).lock().unwrap();
             let seen: Vec<Seen> = seen.iter().filter(|s| s.dim == dim).cloned().collect();
+            let groups = super::pillagers::groups(mobs.values().filter(|m| m.dim == dim));
+            let others = super::animals::snapshot(mobs.values().filter(|m| m.dim == dim));
             for m in mobs.values_mut().filter(|m| m.dim == dim) {
                 m.age += 1;
                 if let Some(t) = m.death_ticks {
@@ -695,13 +885,13 @@ pub fn tick(server: &Arc<Server>, age: i64) {
                 if nearest > 160.0 * 160.0 && m.kind != MobKind::EnderDragon {
                     continue; // too far: frozen
                 }
-                let look = |m: &Mob| (m.target.is_some(), m.fire > 0, m.fuse.is_some(), m.angry > 0, m.burst > 0, m.charging, m.dragon.as_ref().map(|d| d.phase));
+                let look = |m: &Mob| (m.target.is_some(), m.fire > 0, m.fuse.is_some(), m.angry > 0, m.burst > 0, m.charging, m.dragon.as_ref().map(|d| d.phase), m.charging());
                 let before = look(m);
                 let health_before = m.health;
                 if m.kind == MobKind::EnderDragon {
                     super::dragon::ai(server, &mut world, m, &seen, &crystals, &mut actions);
                 } else {
-                    ai(server, &mut world, m, &seen, day, &mut actions);
+                    ai(server, &mut world, m, &seen, &groups, &others, day, &mut actions);
                     physics(&mut world, m, &mut actions);
                 }
                 // Arms raised, on fire, about to explode...: new metadata.
@@ -752,11 +942,19 @@ pub fn run_actions(server: &Arc<Server>, actions: Vec<Action>) {
     for a in actions {
         match a {
             Action::Hurt(p, amount, kind, by) => {
+                // Whoever hurts a player gets its wolves on it.
+                if !server.players.read().unwrap().contains_key(&by.eid) {
+                    super::animals::sic(server, p.uuid, by.eid);
+                }
                 health::damage(server, &p, amount, kind, Some(by));
             }
+            Action::Breed(dim, kind, at, parents, by, owner) => super::animals::breed(server, dim, kind, at, parents, by, owner),
+            Action::HurtMob(target, amount, by) => hurt(server, target, amount, "mob_attack", Some(by), None, 0),
             Action::Explode(dim, pos, power, by, fire) => explosion::explode_ex(server, dim, pos, power, Some(by), fire),
             Action::Shoot(dim, kind, shooter, from, vel) => {
+                let crossbow = kind == ProjectileKind::Arrow && kind_of(server, shooter) == Some(MobKind::Pillager);
                 let snd = match kind {
+                    ProjectileKind::Arrow if crossbow => "item.crossbow.shoot",
                     ProjectileKind::Arrow => "entity.skeleton.shoot",
                     ProjectileKind::SmallFireball => "entity.blaze.shoot",
                     ProjectileKind::Fireball => "entity.ghast.shoot",
@@ -788,7 +986,7 @@ pub fn dist2(a: &[f64; 3], b: &[f64; 3]) -> f64 {
     (0..3).map(|i| (a[i] - b[i]).powi(2)).sum()
 }
 
-fn normalize(v: [f64; 3]) -> [f64; 3] {
+pub(super) fn normalize(v: [f64; 3]) -> [f64; 3] {
     let l = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt().max(1e-9);
     [v[0] / l, v[1] / l, v[2] / l]
 }
@@ -812,16 +1010,22 @@ fn teleport_random(world: &mut World, m: &mut Mob, around: [f64; 3], range: f64)
     false
 }
 
-fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool, actions: &mut Vec<Action>) {
+#[allow(clippy::too_many_arguments)]
+fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &std::collections::HashMap<u32, super::pillagers::Group>, others: &[super::animals::Other], day: bool, actions: &mut Vec<Action>) {
+    let group = groups.get(&m.patrol).filter(|_| m.patrol != 0);
     m.attack_cooldown = m.attack_cooldown.saturating_sub(1);
     m.hurt_time = m.hurt_time.saturating_sub(1);
     m.panic = m.panic.saturating_sub(1);
     m.busy = m.busy.saturating_sub(1);
     let kind = m.kind;
 
-    // Zombies and skeletons burn in sunlight.
+    // Rain puts out burning mobs.
+    if m.fire > 0 && m.age % 10 == 0 && super::weather::rain_at(server, world, m.dim, m.pos) {
+        m.fire = 0;
+    }
+    // Zombies and skeletons burn in sunlight (not while it rains on them).
     if matches!(kind, MobKind::Zombie | MobKind::Skeleton) && day && m.dim == Dimension::Overworld && m.age % 20 == 0 {
-        if sky_exposed(world, m.pos) && !in_water(world, m.pos) {
+        if sky_exposed(world, m.pos) && !in_water(world, m.pos) && !super::weather::rain_at(server, world, m.dim, m.pos) {
             if m.fire == 0 {
                 m.fire = 1;
             }
@@ -911,7 +1115,13 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
 
     let mut goal: Option<([f64; 3], f64)> = None;
     let target: Option<&Seen> = if kind.aggressive() {
-        let range = if kind == MobKind::Ghast { 64.0 } else if kind == MobKind::Blaze { 48.0 } else { 16.0 };
+        // Zombies notice players from further away (vanilla: 35 blocks).
+        let range = match kind {
+            MobKind::Ghast => 64.0,
+            MobKind::Blaze => 48.0,
+            MobKind::Zombie => 32.0,
+            _ => 16.0,
+        };
         let t = seen
             .iter()
             .filter(|s| s.targetable && dist2(&s.pos, &m.pos) < range * range && !(kind == MobKind::Piglin && s.gold_armor))
@@ -925,6 +1135,8 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
     } else {
         None
     };
+    // A patrol fights together: whoever spots the player warns the others.
+    let target = if kind == MobKind::Pillager { target.or_else(|| super::pillagers::shared_target(m, group, seen)) } else { target };
     m.target = target.map(|t| t.player.eid);
     if m.target.is_none() && m.angry > 0 {
         m.angry = 0;
@@ -937,7 +1149,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
         face(m, t.pos);
         let reach = 1.6 + m.size().0 / 2.0;
         match kind {
-            MobKind::Zombie | MobKind::Spider | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::WitherSkeleton | MobKind::Hoglin | MobKind::Enderman | MobKind::Endermite => {
+            MobKind::Zombie | MobKind::Spider | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::WitherSkeleton | MobKind::Hoglin | MobKind::Enderman | MobKind::Endermite | MobKind::Wolf => {
                 let speed = if kind == MobKind::Enderman { 0.15 } else { kind.speed() * 1.25 };
                 goal = Some((t.pos, speed));
                 if d < reach && dy < 2.5 && m.attack_cooldown == 0 {
@@ -957,13 +1169,49 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
                 }
             }
             MobKind::Skeleton => {
-                if d > 10.0 {
-                    goal = Some((t.pos, kind.speed()));
+                // Shoots only what it sees; otherwise (or too far) it walks to the player.
+                // In range it keeps its distance and circles around while drawing the bow.
+                // On hard it also backs off, flanks shields and takes cover from archers
+                // (see `skeletons`).
+                let eye = [m.pos[0], m.pos[1] + 1.74, m.pos[2]];
+                let sees = d < 16.0 && line_of_sight(world, eye, t.eye);
+                let hard = server.config.difficulty >= 3;
+                // Full draw: 20 ticks on hard, 30 otherwise.
+                let draw = if hard { 20 } else { 30 };
+                let tactic = if hard && d < 20.0 { super::skeletons::tactics(world, m, t, d, sees, m.drawing >= draw) } else { None };
+                if let Some(g) = tactic {
+                    goal = Some(g.unwrap_or((m.pos, 0.0)));
+                } else if !sees || d > 12.0 {
+                    goal = Some((t.pos, kind.speed() * 1.25));
+                } else {
+                    if entities::random() < 0.05 {
+                        m.strafe = -m.strafe;
+                    }
+                    let to = normalize([t.pos[0] - m.pos[0], 0.0, t.pos[2] - m.pos[2]]);
+                    let back = if d < 6.0 { -0.7 } else if d > 10.0 { 0.5 } else { 0.0 };
+                    let dir = [to[0] * back - to[2] * m.strafe, 0.0, to[2] * back + to[0] * m.strafe];
+                    goal = Some(([m.pos[0] + dir[0] * 2.0, m.pos[1], m.pos[2] + dir[2] * 2.0], kind.speed() * 0.6));
                 }
-                if d < 15.0 && m.attack_cooldown == 0 {
-                    m.attack_cooldown = if server.config.difficulty >= 3 { 20 } else { 40 };
+                // In cover it draws the bow without seeing the player, and holds it drawn.
+                let hidden = hard && m.cover.is_some();
+                if !sees && !hidden {
+                    m.drawing = 0;
+                } else if m.drawing == 0 && m.attack_cooldown == 0 {
+                    m.drawing = 1;
+                } else if m.drawing > 0 && m.drawing < draw {
+                    m.drawing += 1;
+                }
+                if sees && m.drawing >= draw {
+                    face(m, t.pos);
+                }
+                // Never into a raised shield.
+                let shielded = t.shield_up && super::skeletons::shield_covers(t, m.pos);
+                if m.drawing >= draw && sees && !shielded {
+                    m.drawing = 0;
+                    m.attack_cooldown = if server.config.difficulty >= 3 { 10 } else { 25 };
                     let from = [m.pos[0], m.pos[1] + 1.5, m.pos[2]];
-                    let to = [t.pos[0], t.pos[1] + 1.1, t.pos[2]];
+                    // Vanilla aims at a third of the target's height; the arc compensation does the rest.
+                    let to = [t.pos[0], t.pos[1] + 0.6, t.pos[2]];
                     let dir = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
                     let horiz = (dir[0] * dir[0] + dir[2] * dir[2]).sqrt();
                     let speed = 1.6;
@@ -1036,6 +1284,9 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
                     }
                 }
             }
+            MobKind::Pillager => {
+                goal = super::pillagers::combat(server, world, m, t, group, actions);
+            }
             MobKind::MagmaCube => {
                 if d < reach && dy < 2.0 && m.attack_cooldown == 0 {
                     m.attack_cooldown = 20;
@@ -1053,7 +1304,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
                 if *f >= 30 {
                     m.health = 0.0;
                     m.death_ticks = Some(20); // disappears without a death animation
-                    actions.push(Action::Explode(m.dim, m.center(), 3.0, Attacker { eid: m.eid, name: "Creeper".into(), pos: Some(m.center()) }, false));
+                    actions.push(Action::Explode(m.dim, m.center(), if m.charged { 6.0 } else { 3.0 }, Attacker { eid: m.eid, name: "Creeper".into(), pos: Some(m.center()) }, false));
                     return;
                 }
             }
@@ -1064,6 +1315,51 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
             m.charging = false;
             m.burst = 0;
         }
+    }
+
+    // Walking towards a player: along an A* path, so they go around walls and up steps
+    // instead of pushing in a straight line.
+    if let (Some(t), Some((g, speed))) = (target, goal) {
+        if g == t.pos && !kind.flies() {
+            goal = Some((follow_path(world, m, t.pos), speed));
+        }
+    } else if kind != MobKind::Pillager {
+        m.path.clear();
+        m.path_goal = None;
+    }
+
+    // Undead that burn: shortly before sunrise and during the day they go for the shade (under
+    // trees, roofs, caves) and do not leave it; from there they still attack whoever comes close
+    // and skeletons keep shooting.
+    if matches!(kind, MobKind::Zombie | MobKind::Skeleton) && m.dim == Dimension::Overworld && sun_soon(server) && !in_water(world, m.pos) {
+        if m.age % 10 == 0 || m.shade.is_some() {
+            m.exposed = sky_exposed(world, m.pos);
+        }
+        if m.exposed {
+            let stale = m.shade.is_none_or(|c| sky_exposed(world, [c.x as f64 + 0.5, c.y as f64, c.z as f64 + 0.5]));
+            if stale && m.age % 20 == m.eid.unsigned_abs() % 20 {
+                m.shade = find_shade(world, m);
+            }
+            if let Some(c) = m.shade {
+                let dest = [c.x as f64 + 0.5, c.y as f64, c.z as f64 + 0.5];
+                let next = follow_path(world, m, dest);
+                goal = Some((next, kind.speed() * 1.4));
+            }
+        } else {
+            m.shade = None;
+            let into_sun = goal.is_some_and(|(g, _)| {
+                let (dx, dz) = (g[0] - m.pos[0], g[2] - m.pos[2]);
+                let len = (dx * dx + dz * dz).sqrt().max(1e-6);
+                sky_exposed(world, [m.pos[0] + dx / len * 0.8, g[1].max(m.pos[1]), m.pos[2] + dz / len * 0.8])
+            });
+            if into_sun || goal.is_none() {
+                m.vel[0] = 0.0;
+                m.vel[2] = 0.0;
+                return;
+            }
+        }
+    } else {
+        m.shade = None;
     }
 
     // Magma cube: moves by hopping.
@@ -1108,6 +1404,18 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
         return;
     }
 
+    // Patrol on the move (or waiting in formation).
+    if kind == MobKind::Pillager && target.is_none() {
+        goal = super::pillagers::patrol(world, m, group);
+    }
+    // Animals: love, babies growing up, following food; tamed wolves.
+    if super::animals::breeds(kind) {
+        let g = super::animals::behave(world, m, seen, others, actions);
+        if goal.is_none() {
+            goal = g;
+        }
+    }
+
     // Animals, villagers and monsters without a target: wander or flee.
     if goal.is_none() {
         let speed = if m.panic > 0 { kind.speed() * 2.0 } else { kind.speed() };
@@ -1133,6 +1441,12 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
     // Horizontal movement towards the target (except during knockback from a hit).
     if m.knockback_ticks > 0 {
         m.knockback_ticks -= 1;
+    } else if let (Some((_, speed)), Some((dir, left))) = (goal, m.detour) {
+        // Going around a wall: walk along it for a while, then try the goal again.
+        m.vel[0] = dir[0] * speed;
+        m.vel[2] = dir[1] * speed;
+        face(m, [m.pos[0] + dir[0], m.pos[1], m.pos[2] + dir[1]]);
+        m.detour = (left > 1).then_some((dir, left - 1));
     } else if let Some((g, speed)) = goal {
         let (dx, dz) = (g[0] - m.pos[0], g[2] - m.pos[2]);
         let len = (dx * dx + dz * dz).sqrt();
@@ -1146,7 +1460,165 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], day: bool,
     }
 }
 
-fn face(m: &mut Mob, target: [f64; 3]) {
+/// Nothing solid between two points (sampled every quarter block).
+pub(super) fn line_of_sight(world: &mut World, from: [f64; 3], to: [f64; 3]) -> bool {
+    let g = crate::gameplay::get();
+    let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    let steps = ((d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() * 4.0).ceil().max(1.0) as i32;
+    let mut last = None;
+    for i in 1..steps {
+        let f = i as f64 / steps as f64;
+        let p = [from[0] + d[0] * f, from[1] + d[1] * f, from[2] + d[2] * f];
+        let c = cell(p);
+        if last == Some(c) {
+            continue;
+        }
+        last = Some(c);
+        let (lx, ly, lz) = (p[0] - c.x as f64, p[1] - c.y as f64, p[2] - c.z as f64);
+        let state = world.get_block(c);
+        if g.shape(state).iter().any(|s| lx >= s[0] && lx <= s[3] && ly >= s[1] && ly <= s[4] && lz >= s[2] && lz <= s[5]) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Day, or less than a minute before sunrise.
+fn sun_soon(server: &Server) -> bool {
+    let t = server.day_time.load(Ordering::Relaxed).rem_euclid(24000);
+    !(12542..22300).contains(&t)
+}
+
+/// Closest shaded cell it can stand in, among random ones within 12 blocks.
+fn find_shade(world: &mut World, m: &Mob) -> Option<BlockPos> {
+    let (w, h) = m.size();
+    let base = cell(m.pos);
+    let mut best: Option<(f64, BlockPos)> = None;
+    for _ in 0..24 {
+        let (dx, dz) = (((entities::random() - 0.5) * 24.0) as i32, ((entities::random() - 0.5) * 24.0) as i32);
+        for dy in [0, 1, -1, 2, -2, 3, -3, 4, -4] {
+            let c = BlockPos::new(base.x + dx, base.y + dy, base.z + dz);
+            if !crate::world::pathfind::standable(world, c, w, h) {
+                continue;
+            }
+            let p = [c.x as f64 + 0.5, c.y as f64, c.z as f64 + 0.5];
+            if !sky_exposed(world, p) {
+                let d = dist2(&p, &m.pos);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, c));
+                }
+            }
+            break;
+        }
+    }
+    best.map(|b| b.1)
+}
+
+fn cell(p: [f64; 3]) -> BlockPos {
+    BlockPos::new(p[0].floor() as i32, (p[1] + 0.01).floor() as i32, p[2].floor() as i32)
+}
+
+/// Next point to walk to on the way to `target`, (re)computing the path when needed.
+pub(super) fn follow_path(world: &mut World, m: &mut Mob, target: [f64; 3]) -> [f64; 3] {
+    let goal = cell(target);
+    m.path_wait = m.path_wait.saturating_sub(1);
+    // Close and at the same height: straight at it.
+    if dist2(&m.pos, &target) < 2.0 * 2.0 && (target[1] - m.pos[1]).abs() < 1.0 {
+        m.path.clear();
+        return target;
+    }
+    // Waypoints already reached (center of the cell, at its height or above).
+    while let Some(&c) = m.path.front() {
+        let (dx, dz) = (c.x as f64 + 0.5 - m.pos[0], c.z as f64 + 0.5 - m.pos[2]);
+        if dx * dx + dz * dz < 0.4 * 0.4 && m.pos[1] > c.y as f64 - 0.5 {
+            m.path.pop_front();
+            m.path_best = f64::MAX;
+        } else {
+            break;
+        }
+    }
+    // Shortcut: on flat ground, head straight for a later waypoint if the way there is clear
+    // (instead of zig-zagging from cell centre to cell centre).
+    if m.age % 5 == 0 {
+        let (w, h) = m.size();
+        let here = cell(m.pos);
+        while m.path.len() > 1 {
+            let next = m.path[1];
+            if next.y != here.y || !straight_walk(world, m.pos, next, w, h) {
+                break;
+            }
+            m.path.pop_front();
+            m.path_best = f64::MAX;
+        }
+    }
+    // Stuck: no progress towards the next waypoint for 2 s, so plan again.
+    if let Some(c) = m.path.front() {
+        let d = dist2(&m.pos, &[c.x as f64 + 0.5, c.y as f64, c.z as f64 + 0.5]);
+        if d + 0.01 < m.path_best {
+            m.path_best = d;
+            m.path_stuck = 0;
+        } else {
+            m.path_stuck += 1;
+            if m.path_stuck > 40 {
+                m.path.clear();
+                m.path_wait = 0;
+                m.path_stuck = 0;
+                m.path_best = f64::MAX;
+            }
+        }
+    }
+    let lost = m.path.front().is_some_and(|c| dist2(&m.pos, &[c.x as f64 + 0.5, c.y as f64, c.z as f64 + 0.5]) > 3.0 * 3.0);
+    let moved = m.path_goal.is_none_or(|g| (g.x - goal.x).abs() + (g.y - goal.y).abs() + (g.z - goal.z).abs() > 2);
+    if m.path_wait == 0 && (m.path.is_empty() || lost || moved) && PATH_BUDGET.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(1)).is_ok() {
+        let (w, h) = m.size();
+        m.path = crate::world::pathfind::find(world, cell(m.pos), goal, w, h, 800).unwrap_or_default().into();
+        m.path_goal = Some(goal);
+        m.path_best = f64::MAX;
+        // Unreachable target: do not search again on every tick.
+        m.path_wait = if m.path.is_empty() { 40 } else { 10 };
+    }
+    match m.path.front() {
+        Some(c) => {
+            m.detour = None;
+            let p = [c.x as f64 + 0.5, c.y as f64, c.z as f64 + 0.5];
+            // Ladder or vine: the next step is above, so climb.
+            if p[1] > m.pos[1] + 0.5 && crate::world::pathfind::climbable(block_name(world, m.pos, 0.2)) {
+                m.vel[1] = 0.2;
+            }
+            face(m, p);
+            p
+        }
+        None => target,
+    }
+}
+
+/// Whether a mob can walk in a straight line from `from` to the cell `to` (same height):
+/// every cell crossed is standable.
+fn straight_walk(world: &mut World, from: [f64; 3], to: BlockPos, w: f64, h: f64) -> bool {
+    let (tx, tz) = (to.x as f64 + 0.5, to.z as f64 + 0.5);
+    let (dx, dz) = (tx - from[0], tz - from[2]);
+    let steps = (dx.hypot(dz) * 3.0).ceil().max(1.0) as i32;
+    let mut last = None;
+    for i in 1..=steps {
+        let f = i as f64 / steps as f64;
+        // The mob's half-width each side of the line.
+        for side in [-0.3, 0.3] {
+            let (nx, nz) = (-dz, dx);
+            let len = nx.hypot(nz).max(1e-6);
+            let c = BlockPos::new((from[0] + dx * f + nx / len * side).floor() as i32, to.y, (from[2] + dz * f + nz / len * side).floor() as i32);
+            if last == Some(c) {
+                continue;
+            }
+            last = Some(c);
+            if !crate::world::pathfind::standable(world, c, w, h) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+pub(super) fn face(m: &mut Mob, target: [f64; 3]) {
     let (dx, dz) = (target[0] - m.pos[0], target[2] - m.pos[2]);
     if dx.abs() + dz.abs() > 1e-3 {
         m.yaw = (-dx.atan2(dz)).to_degrees() as f32;
@@ -1200,12 +1672,20 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
         m.vel[0] *= 0.3;
         m.vel[2] *= 0.3;
     }
-    // Step up one block; spiders climb walls.
+    // Step up one block; spiders climb walls. Anything taller (a wall, a fence) cannot be
+    // jumped: without this check the mob would hop against it forever, so it goes around it.
     if blocked && !m.kind.flies() {
         if m.kind == MobKind::Spider {
             m.vel[1] = 0.2;
         } else if m.on_ground {
-            m.vel[1] = 0.42;
+            if can_jump_over(world, m, want) {
+                // Gravity is applied before moving, so 0.5 gives vanilla's first 0.42 and a
+                // peak of ~1.25 blocks (with 0.42 it stayed at 0.85 and never cleared a block).
+                m.vel[1] = 0.5;
+            } else if m.detour.is_none() {
+                m.wander = None;
+                m.detour = Some((along_wall(want, d), 20 + (entities::random() * 20.0) as u32));
+            }
         }
     }
     if m.knockback_ticks > 0 && m.kind != MobKind::MagmaCube {
@@ -1215,9 +1695,51 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
     }
 }
 
+/// Whether, raised a jump's height (1.1 blocks: a block yes, a fence or a wall no), the mob could
+/// keep moving horizontally.
+fn can_jump_over(world: &mut World, m: &Mob, want: [f64; 3]) -> bool {
+    let a = m.aabb();
+    if move_aabb(world, &a, [0.0, 1.1, 0.0])[1] < 1.1 - 1e-6 {
+        return false;
+    }
+    let h = move_aabb(world, &a.offset([0.0, 1.1, 0.0]), [want[0], 0.0, want[2]]);
+    let low = move_aabb(world, &a, [want[0], 0.0, want[2]]);
+    h[0].hypot(h[2]) > low[0].hypot(low[2]) + 1e-3
+}
+
+/// Direction along the obstacle: keeps the free axis; in a corner, goes back along one of them.
+fn along_wall(want: [f64; 3], moved: [f64; 3]) -> [f64; 2] {
+    let side = || if entities::random() < 0.5 { 1.0 } else { -1.0 };
+    let sign = |v: f64| if v.abs() > 1e-3 { v.signum() } else { side() };
+    let bx = (moved[0] - want[0]).abs() > 1e-6;
+    let bz = (moved[2] - want[2]).abs() > 1e-6;
+    match (bx, bz) {
+        (true, false) => [0.0, sign(want[2])],
+        (false, true) => [sign(want[0]), 0.0],
+        _ if entities::random() < 0.5 => [-sign(want[0]), 0.0],
+        _ => [0.0, -sign(want[2])],
+    }
+}
+
 // ---------- combat ----------
 
 /// A player hits a mob (or a dragon part).
+/// A lightning bolt charges a creeper.
+pub fn charge(server: &Server, eid: i32) {
+    let meta = {
+        let mut mobs = server.mobs.lock().unwrap();
+        let Some(m) = mobs.get_mut(&eid) else { return };
+        m.charged = true;
+        metadata(m)
+    };
+    server.broadcast_tracked(eid, &meta, true);
+}
+
+/// Removes a mob without a death (it turns into something else).
+pub fn remove(server: &Server, eid: i32) {
+    server.mobs.lock().unwrap().remove(&eid);
+}
+
 pub fn attacked_by_player(server: &Arc<Server>, player: &Arc<Player>, eid: i32) {
     // The dragon's parts have the 8 ids following its own; the head is the first.
     let (target, part) = {
@@ -1264,6 +1786,8 @@ pub fn attacked_by_player(server: &Arc<Server>, player: &Arc<Player>, eid: i32) 
     let (s, c) = (sw.yaw.to_radians() as f64).sin_cos();
     let knock = (kind != MobKind::EnderDragon && kind != MobKind::EndCrystal).then_some([-s * sw.knockback, 0.4, c * sw.knockback]);
     hurt(server, eid, dmg, "player_attack", Some(player.eid), knock, fire);
+    // The player's wolves join in.
+    super::animals::sic(server, player.uuid, eid);
 }
 
 /// Pushes a mob in direction `dir` (shield blocking a hit).
@@ -1338,14 +1862,16 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
                 m.fire = m.fire.max(1);
             }
             match m.kind {
-                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin => {
-                    if let Some(p) = by_player {
+                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf => {
+                    // A tamed wolf does not turn on anyone; a wild one calls its pack.
+                    if let Some(p) = by_player.filter(|_| m.owner.is_none()) {
                         m.angry = 400 + (entities::random() * 400.0) as u32;
                         m.target = Some(p);
-                        if m.kind == MobKind::ZombifiedPiglin {
+                        if matches!(m.kind, MobKind::ZombifiedPiglin | MobKind::Wolf) {
                             alert = Some((m.dim, m.pos, p));
                         }
                     }
+                    m.sitting = false;
                 }
                 k if k.hostile() => {
                     if let Some(p) = by {
@@ -1396,7 +1922,8 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
     // Nearby zombified piglins join the fight.
     if let Some((dim, pos, p)) = alert {
         let mut mobs = server.mobs.lock().unwrap();
-        for o in mobs.values_mut().filter(|o| o.kind == MobKind::ZombifiedPiglin && o.dim == dim && o.death_ticks.is_none() && dist2(&o.pos, &pos) < 20.0 * 20.0) {
+        let pack = mobs.get(&eid).map_or(MobKind::ZombifiedPiglin, |m| m.kind);
+        for o in mobs.values_mut().filter(|o| o.kind == pack && o.owner.is_none() && o.dim == dim && o.death_ticks.is_none() && dist2(&o.pos, &pos) < 20.0 * 20.0) {
             o.angry = o.angry.max(400 + (entities::random() * 400.0) as u32);
             o.target = Some(p);
         }
@@ -1425,10 +1952,31 @@ fn on_death(server: &Arc<Server>, m: &Mob, killer: Option<i32>) {
         })
         .unwrap_or(0);
     let mut drops = gameplay::get().mob_drops(m.kind.name(), player.is_some(), looting, &mut entities::random);
+    // Babies drop nothing.
+    if m.grow < 0 {
+        drops.clear();
+    }
     if m.kind == MobKind::MagmaCube {
         // There are no frogs: only magma cream, and only from large cubes.
         let cream = data::get().item_id("magma_cream");
         drops.retain(|d| Some(d.0) == cream && m.size > 1);
+    }
+    // The patrol captain drops its banner and whoever killed it gets Bad Omen; the crossbow
+    // sometimes.
+    if m.kind == MobKind::Pillager {
+        if m.captain {
+            if let Some(b) = super::pillagers::ominous_banner() {
+                entities::spawn(server, m.dim, m.center(), [0.0, 0.2, 0.0], b, 10);
+            }
+            if let Some(p) = &player {
+                effects::add(server, p, "bad_omen", 0, 120000, 1.0);
+            }
+        }
+        if player.is_some() && entities::random() < 0.085 + 0.01 * looting as f32 {
+            if let Some(c) = data::get().item_id("crossbow") {
+                drops.push((c, 1));
+            }
+        }
     }
     // Unsheared sheep drop wool.
     if m.kind == MobKind::Sheep && !m.sheared {
@@ -1454,7 +2002,7 @@ fn on_death(server: &Arc<Server>, m: &Mob, killer: Option<i32>) {
             set_size(server, eid, m.size / 2);
         }
     }
-    if player.is_some() {
+    if player.is_some() && m.grow >= 0 {
         let xp = match m.kind {
             MobKind::Villager => 0,
             MobKind::Blaze => 10,
@@ -1513,6 +2061,10 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32)
         let st = player.state.lock().unwrap();
         st.inv.held(hand, st.held_slot).clone()
     };
+    // Feeding, breeding, taming and wolves sitting down.
+    if super::animals::interact(server, player, eid, hand, held.as_ref().map(|h| h.name())) {
+        return;
+    }
     if kind == MobKind::Villager {
         super::villagers::open_trades(server, player, eid);
         return;
@@ -1589,6 +2141,13 @@ fn spawn_spot(world: &mut World, x: i32, z: i32, from_y: i32, room: i32) -> Opti
 }
 
 /// Lava surface with air above (for striders).
+/// Ground with open sky above, for a patrol.
+pub(super) fn open_sky_spot(world: &mut World, x: i32, z: i32, from_y: i32) -> Option<[f64; 3]> {
+    let spot = spawn_spot(world, x, z, from_y, 2)?;
+    let below = data::get().block_of_state(world.get_block(BlockPos::new(x, spot[1] as i32 - 1, z))).name.as_str();
+    (sky_exposed(world, spot) && !matches!(below, "water" | "lava" | "ice")).then_some(spot)
+}
+
 fn lava_spot(world: &mut World, x: i32, z: i32, from_y: i32) -> Option<[f64; 3]> {
     let reg = data::get();
     for y in (from_y - 24..from_y + 16).rev() {
@@ -1612,7 +2171,8 @@ fn pick<T: Copy>(table: &[(T, u32)]) -> T {
 }
 
 fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
-    let night = !is_day(server);
+    // Thunderstorms darken the sky enough for monsters to spawn.
+    let night = !is_day(server) || server.weather.lock().unwrap().is_thundering();
     let counts: Vec<(usize, usize)> = {
         let mobs = server.mobs.lock().unwrap();
         seen.iter()
@@ -1643,7 +2203,9 @@ fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
                 }
                 // Animals: on grass, every so often, in small groups.
                 if server.config.spawn_animals && age % 200 == 0 && passive < PASSIVE_CAP && below == "grass_block" {
-                    let kind = [MobKind::Cow, MobKind::Pig, MobKind::Sheep, MobKind::Chicken][(entities::random() * 4.0) as usize % 4];
+                    let biome = world.generator().biome_name(x, z);
+                    let wolves = (biome.contains("forest") || biome.contains("taiga") || biome == "grove") && entities::random() < 0.25;
+                    let kind = if wolves { MobKind::Wolf } else { [MobKind::Cow, MobKind::Pig, MobKind::Sheep, MobKind::Chicken][(entities::random() * 4.0) as usize % 4] };
                     for i in 0..2 + (entities::random() * 2.0) as i32 {
                         to_spawn.push((s.dim, kind, [spot[0] + i as f64 * 0.7, spot[1], spot[2]]));
                     }

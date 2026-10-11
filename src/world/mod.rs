@@ -5,6 +5,7 @@ pub mod anvil;
 pub mod blockentity;
 pub mod chunk;
 pub mod generator;
+pub mod pathfind;
 pub mod physics;
 
 use crate::config::Config;
@@ -85,18 +86,55 @@ impl Dimension {
 pub struct World {
     pub dim: Dimension,
     chunks: HashMap<(i32, i32), Chunk>,
-    generator: Generator,
+    /// Where new chunks come from (disk or generator); shareable so chunks can be loaded and
+    /// generated without holding the world lock.
+    source: Arc<ChunkSource>,
     /// World root folder (`level.dat`, `playerdata/`, `mobs.json`).
     dir: PathBuf,
     /// Unload rounds (to know which chunks are still in use).
     epoch: u64,
 }
 
+/// Loads a chunk from disk or generates it. Needs no access to the loaded chunks.
+pub struct ChunkSource {
+    pub generator: Generator,
+    dir: PathBuf,
+    dim: Dimension,
+}
+
+impl ChunkSource {
+    fn dim_dir(&self) -> PathBuf {
+        self.dir.join(self.dim.folder())
+    }
+
+    pub fn produce(&self, cx: i32, cz: i32) -> Chunk {
+        match self.load(cx, cz) {
+            Ok(Some(c)) => c,
+            Ok(None) => self.generator.generate(cx, cz),
+            Err(e) => {
+                warn!("chunk {cx},{cz} de {:?} ilegible, se regenera: {e:#}", self.dim);
+                self.generator.generate(cx, cz)
+            }
+        }
+    }
+
+    fn load(&self, cx: i32, cz: i32) -> Result<Option<Chunk>> {
+        if let Some(n) = anvil::read_chunk(&self.dim_dir(), cx, cz)? {
+            return anvil::chunk_from_nbt(&n, self.dim).map(Some);
+        }
+        if self.dim == Dimension::Overworld {
+            return self.load_legacy(cx, cz);
+        }
+        Ok(None)
+    }
+}
+
 impl World {
     pub fn new(cfg: &Config, dim: Dimension) -> Result<Self> {
         let dir = PathBuf::from(&cfg.world_folder);
         std::fs::create_dir_all(dir.join(dim.folder()).join("region"))?;
-        Ok(Self { dim, chunks: HashMap::new(), generator: Generator::for_dimension(dim, &cfg.generation), dir, epoch: 0 })
+        let source = Arc::new(ChunkSource { generator: Generator::for_dimension(dim, &cfg.generation), dir: dir.clone(), dim });
+        Ok(Self { dim, chunks: HashMap::new(), source, dir, epoch: 0 })
     }
 
     /// Flat world in a temporary folder (tests).
@@ -118,19 +156,26 @@ impl World {
     }
 
     pub fn generator(&self) -> &Generator {
-        &self.generator
+        &self.source.generator
+    }
+
+    pub fn source(&self) -> Arc<ChunkSource> {
+        self.source.clone()
+    }
+
+    /// Of `coords`, the chunks not loaded yet.
+    pub fn missing(&self, coords: &[(i32, i32)]) -> Vec<(i32, i32)> {
+        coords.iter().copied().filter(|c| !self.chunks.contains_key(c)).collect()
+    }
+
+    /// Adds a chunk produced outside the lock (unless it was loaded in the meantime).
+    pub fn insert(&mut self, cx: i32, cz: i32, c: Chunk) {
+        self.chunks.entry((cx, cz)).or_insert(c);
     }
 
     fn chunk(&mut self, cx: i32, cz: i32) -> &mut Chunk {
         if !self.chunks.contains_key(&(cx, cz)) {
-            let c = match self.load(cx, cz) {
-                Ok(Some(c)) => c,
-                Ok(None) => self.generator.generate(cx, cz),
-                Err(e) => {
-                    warn!("chunk {cx},{cz} de {:?} ilegible, se regenera: {e:#}", self.dim);
-                    self.generator.generate(cx, cz)
-                }
-            };
+            let c = self.source.produce(cx, cz);
             self.chunks.insert((cx, cz), c);
         }
         let epoch = self.epoch;
@@ -139,11 +184,89 @@ impl World {
         c
     }
 
-    /// Chunk packet, with the light coming in from its four neighbors.
-    pub fn chunk_packet(&mut self, cx: i32, cz: i32) -> Arc<Vec<u8>> {
-        let sky = self.dim.has_sky();
-        let neighbors = [(0, -1), (0, 1), (-1, 0), (1, 0)].map(|(dx, dz)| Some(self.chunk(cx + dx, cz + dz).faces(sky)));
-        self.chunk(cx, cz).packet(cx, cz, sky, neighbors)
+    /// Packets of several chunks, building the missing ones outside the world lock:
+    /// `lock` takes the world, the light and the encoding run on copies in parallel, and the
+    /// results are stored back if the chunks did not change meanwhile. The chunks (and their
+    /// neighbors) must already be loaded.
+    pub fn packets_outside_lock(lock: &std::sync::Mutex<World>, batch: &[(i32, i32)]) -> Vec<Arc<Vec<u8>>> {
+        let near = |(x, z): (i32, i32)| [(x, z - 1), (x, z + 1), (x - 1, z), (x + 1, z)];
+        // 1. Under the lock: copies of what has to be built.
+        let (sky, mut out, todo, mut faces, face_todo) = {
+            let mut w = lock.lock().unwrap();
+            let sky = w.dim.has_sky();
+            let mut out: Vec<Option<Arc<Vec<u8>>>> = vec![None; batch.len()];
+            let mut todo = Vec::new();
+            let mut faces: HashMap<(i32, i32), Arc<chunk::LightFaces>> = HashMap::new();
+            let mut face_todo: Vec<((i32, i32), Chunk)> = Vec::new();
+            for (i, &k) in batch.iter().enumerate() {
+                let c = w.chunk(k.0, k.1);
+                if let Some(p) = c.cached_packet() {
+                    out[i] = Some(p);
+                    continue;
+                }
+                todo.push((i, k, c.clone()));
+                for n in near(k) {
+                    if faces.contains_key(&n) || face_todo.iter().any(|f| f.0 == n) {
+                        continue;
+                    }
+                    let nc = w.chunk(n.0, n.1);
+                    match nc.known_faces() {
+                        Some(f) => {
+                            faces.insert(n, f);
+                        }
+                        None => face_todo.push((n, nc.clone())),
+                    }
+                }
+            }
+            (sky, out, todo, faces, face_todo)
+        };
+        if todo.is_empty() {
+            return out.into_iter().flatten().collect();
+        }
+        // 2. Without the lock and in parallel: neighbors' edge light, then the packets.
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 8);
+        let computed: Vec<((i32, i32), u64, Arc<chunk::LightFaces>)> = std::thread::scope(|s| {
+            let per = face_todo.len().div_ceil(threads).max(1);
+            let hs: Vec<_> = face_todo.chunks(per).map(|part| s.spawn(move || part.iter().map(|(k, c)| (*k, c.version, c.compute_faces(sky))).collect::<Vec<_>>())).collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        for (k, _, f) in &computed {
+            faces.insert(*k, f.clone());
+        }
+        #[allow(clippy::type_complexity)]
+        let built: Vec<(usize, (i32, i32), u64, Arc<Vec<u8>>, Arc<chunk::LightFaces>, Option<Arc<(usize, Vec<u8>)>>)> = std::thread::scope(|s| {
+            let per = todo.len().div_ceil(threads).max(1);
+            let faces = &faces;
+            let hs: Vec<_> = todo
+                .chunks(per)
+                .map(|part| {
+                    s.spawn(move || {
+                        part.iter()
+                            .map(|(i, k, c)| {
+                                let n = near(*k).map(|n| faces.get(&n).cloned());
+                                let (p, f, cache) = c.build_packet(k.0, k.1, sky, &n);
+                                (*i, *k, c.version, p, f, cache)
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        // 3. Under the lock again: keep the results where the chunk did not change.
+        let mut w = lock.lock().unwrap();
+        for (k, v, f) in computed {
+            if let Some(c) = w.chunks.get_mut(&k) {
+                c.store(v, Some(f), None);
+            }
+        }
+        for (i, k, v, p, f, cache) in built {
+            if let Some(c) = w.chunks.get_mut(&k) {
+                c.store(v, Some(f), cache);
+            }
+            out[i] = Some(p);
+        }
+        out.into_iter().flatten().collect()
     }
 
     pub fn get_block(&mut self, p: BlockPos) -> u16 {
@@ -162,27 +285,20 @@ impl World {
         let (x, z) = (0..64)
             .flat_map(|r| (-r..=r).flat_map(move |dx| (-r..=r).map(move |dz| (dx * 8, dz * 8))))
             .find(|&(x, z)| {
-                let y = self.generator.surface(x, z);
+                let y = self.source.generator.surface(x, z);
                 self.get_block(BlockPos::new(x, y - 1, z)) != water
             })
             .unwrap_or((0, 0));
-        let mut y = self.generator.surface(x, z);
+        let mut y = self.source.generator.surface(x, z);
         while y < 319 && !reg.is_air(self.get_block(BlockPos::new(x, y, z))) {
             y += 1;
         }
         BlockPos::new(x, y, z)
     }
 
-    fn load(&self, cx: i32, cz: i32) -> Result<Option<Chunk>> {
-        if let Some(n) = anvil::read_chunk(&self.dim_dir(), cx, cz)? {
-            return anvil::chunk_from_nbt(&n, self.dim).map(Some);
-        }
-        if self.dim == Dimension::Overworld {
-            return self.load_legacy(cx, cz);
-        }
-        Ok(None)
-    }
+}
 
+impl ChunkSource {
     /// Previous custom format (`chunks/c.X.Z.bin`): read in order to migrate to Anvil.
     fn load_legacy(&self, cx: i32, cz: i32) -> Result<Option<Chunk>> {
         let path = self.dir.join("chunks").join(format!("c.{cx}.{cz}.bin"));
@@ -211,6 +327,9 @@ impl World {
         c.dirty = true;
         Ok(Some(c))
     }
+}
+
+impl World {
 
     /// Copies the modified chunks and marks them as saved, so they can be converted and written
     /// outside the world lock. If writing fails, `mark_dirty` must be called.
@@ -226,6 +345,14 @@ impl World {
     /// Y of the highest block in column (x, z).
     pub fn top_y(&mut self, x: i32, z: i32) -> i32 {
         self.chunk(x >> 4, z >> 4).top_y((x & 15) as usize, (z & 15) as usize)
+    }
+
+    /// Random ticks of a loaded chunk (see `Chunk::random_blocks`); unloaded chunks are skipped.
+    pub fn random_blocks(&self, cx: i32, cz: i32, n: usize, wanted: &dyn Fn(u16) -> bool, rnd: &mut dyn FnMut() -> u32, out: &mut Vec<(BlockPos, u16)>) {
+        let Some(c) = self.chunks.get(&(cx, cz)) else { return };
+        let mut found = Vec::new();
+        c.random_blocks(n, wanted, rnd, &mut found);
+        out.extend(found.into_iter().map(|(x, y, z, s)| (BlockPos::new(cx * 16 + x as i32, y, cz * 16 + z as i32), s)));
     }
 
     pub fn is_loaded(&self, cx: i32, cz: i32) -> bool {
@@ -270,6 +397,7 @@ impl World {
         // The chunk packet carries the text of signs and banners.
         if be.client_nbt().is_some() || c.block_entities.get(&p).is_some_and(|o| o.client_nbt().is_some()) {
             c.cache = None;
+            c.version += 1;
         }
         c.block_entities.insert(p, be);
     }
@@ -279,6 +407,7 @@ impl World {
         let be = c.block_entities.remove(&p);
         if be.as_ref().is_some_and(|b| b.client_nbt().is_some()) {
             c.cache = None;
+            c.version += 1;
         }
         if be.is_some() {
             c.dirty = true;

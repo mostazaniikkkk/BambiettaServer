@@ -48,9 +48,14 @@ pub enum MobKind {
     EndCrystal,
     Pillager,
     Wolf,
+    Silverfish,
+    CaveSpider,
+    Vindicator,
+    Cat,
+    Ocelot,
 }
 
-pub const ALL: [MobKind; 23] = [
+pub const ALL: [MobKind; 28] = [
     MobKind::Cow,
     MobKind::Pig,
     MobKind::Sheep,
@@ -74,6 +79,11 @@ pub const ALL: [MobKind; 23] = [
     MobKind::EndCrystal,
     MobKind::Pillager,
     MobKind::Wolf,
+    MobKind::Silverfish,
+    MobKind::CaveSpider,
+    MobKind::Vindicator,
+    MobKind::Cat,
+    MobKind::Ocelot,
 ];
 
 impl MobKind {
@@ -102,6 +112,11 @@ impl MobKind {
             MobKind::EndCrystal => "end_crystal",
             MobKind::Pillager => "pillager",
             MobKind::Wolf => "wolf",
+            MobKind::Silverfish => "silverfish",
+            MobKind::CaveSpider => "cave_spider",
+            MobKind::Vindicator => "vindicator",
+            MobKind::Cat => "cat",
+            MobKind::Ocelot => "ocelot",
         }
     }
 
@@ -134,6 +149,11 @@ impl MobKind {
             MobKind::EndCrystal => "Cristal del End",
             MobKind::Pillager => "Saqueador",
             MobKind::Wolf => "Lobo",
+            MobKind::Silverfish => "Lepisma",
+            MobKind::CaveSpider => "Araña de cueva",
+            MobKind::Vindicator => "Vindicador",
+            MobKind::Cat => "Gato",
+            MobKind::Ocelot => "Ocelote",
         }
     }
 
@@ -155,6 +175,9 @@ impl MobKind {
                 | MobKind::Enderman
                 | MobKind::Endermite
                 | MobKind::Pillager
+                | MobKind::Silverfish
+                | MobKind::CaveSpider
+                | MobKind::Vindicator
         )
     }
 
@@ -169,7 +192,7 @@ impl MobKind {
             MobKind::Pig => (0.9, 0.9),
             MobKind::Sheep => (0.9, 1.3),
             MobKind::Chicken => (0.4, 0.7),
-            MobKind::Zombie | MobKind::Villager | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::Pillager => (0.6, 1.95),
+            MobKind::Zombie | MobKind::Villager | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::Pillager | MobKind::Vindicator => (0.6, 1.95),
             MobKind::Skeleton => (0.6, 1.99),
             MobKind::Creeper => (0.6, 1.7),
             MobKind::Spider => (1.4, 0.9),
@@ -182,6 +205,9 @@ impl MobKind {
             MobKind::Enderman => (0.6, 2.9),
             MobKind::Endermite => (0.4, 0.3),
             MobKind::Wolf => (0.6, 0.85),
+            MobKind::Cat | MobKind::Ocelot => (0.6, 0.7),
+            MobKind::Silverfish => (0.4, 0.3),
+            MobKind::CaveSpider => (0.7, 0.5),
             MobKind::EnderDragon => (16.0, 8.0),
             MobKind::EndCrystal => (2.0, 2.0),
         }
@@ -193,7 +219,8 @@ impl MobKind {
             MobKind::Sheep | MobKind::Endermite => 8.0,
             MobKind::Chicken => 4.0,
             MobKind::Spider | MobKind::Piglin => 16.0,
-            MobKind::Pillager => 24.0,
+            MobKind::CaveSpider => 12.0,
+            MobKind::Pillager | MobKind::Vindicator => 24.0,
             MobKind::Wolf => 8.0,
             MobKind::Hoglin | MobKind::Enderman => 40.0,
             MobKind::EnderDragon => 200.0,
@@ -206,12 +233,13 @@ impl MobKind {
     fn speed(self) -> f64 {
         match self {
             MobKind::Chicken | MobKind::Blaze => 0.06,
-            MobKind::Spider => 0.11,
+            MobKind::Spider | MobKind::CaveSpider => 0.11,
+            MobKind::Silverfish => 0.09,
             MobKind::Zombie | MobKind::Creeper | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::Endermite => 0.08,
             MobKind::Skeleton | MobKind::WitherSkeleton | MobKind::Hoglin => 0.09,
             MobKind::Enderman => 0.1,
-            MobKind::Pillager => 0.12,
-            MobKind::Wolf => 0.1,
+            MobKind::Pillager | MobKind::Vindicator => 0.12,
+            MobKind::Wolf | MobKind::Cat | MobKind::Ocelot => 0.1,
             MobKind::Villager | MobKind::Strider | MobKind::Ghast => 0.05,
             _ => 0.07,
         }
@@ -258,7 +286,10 @@ impl MobKind {
         match self {
             MobKind::Zombie => 3.0,
             MobKind::Wolf => 4.0,
-            MobKind::Spider | MobKind::Endermite => 2.0,
+            // Iron axe.
+            MobKind::Vindicator => 8.0,
+            MobKind::Spider | MobKind::Endermite | MobKind::CaveSpider => 2.0,
+            MobKind::Silverfish => 1.0,
             MobKind::ZombifiedPiglin | MobKind::Piglin => 5.0,
             MobKind::WitherSkeleton => 8.0,
             MobKind::Hoglin => 6.0,
@@ -333,6 +364,11 @@ pub struct Mob {
     /// Skeleton on hard: where the player was last tick, how fast it is closing in, and the
     /// cover / peek spots it is using.
     pub last_target: Option<[f64; 3]>,
+    /// Vindicator: the door of the building it is going to search, ticks left searching it,
+    /// and the spot inside it searches around.
+    pub raid_door: Option<BlockPos>,
+    pub explore: u32,
+    pub anchor: Option<[f64; 3]>,
     pub approach: f64,
     pub cover: Option<(BlockPos, BlockPos)>,
     /// Animals: age like vanilla's `Age` (negative: baby; positive: breeding cooldown), ticks
@@ -416,6 +452,7 @@ fn spawn_packets(m: &Mob) -> Vec<Vec<u8>> {
         MobKind::Skeleton => out.push(equipment(m.eid, 0, "bow")),
         MobKind::WitherSkeleton => out.push(equipment(m.eid, 0, "stone_sword")),
         MobKind::Piglin | MobKind::ZombifiedPiglin => out.push(equipment(m.eid, 0, "golden_sword")),
+        MobKind::Vindicator => out.push(equipment(m.eid, 0, "iron_axe")),
         MobKind::Pillager => {
             out.push(equipment(m.eid, 0, "crossbow"));
             if m.captain {
@@ -481,6 +518,23 @@ pub fn metadata(m: &Mob) -> Vec<u8> {
         MobKind::Pillager => {
             // 17: loading the crossbow.
             p.u8(17).varint(8).bool(m.charging());
+        }
+        MobKind::Cat => {
+            // 17: sitting / tamed, 18: owner.
+            p.u8(17).varint(0).i8(if m.sitting { 0x01 } else { 0 } | if m.owner.is_some() { 0x04 } else { 0 });
+            p.u8(18).varint(13);
+            match m.owner {
+                Some(u) => {
+                    p.bool(true).uuid(u);
+                }
+                None => {
+                    p.bool(false);
+                }
+            }
+        }
+        MobKind::Ocelot => {
+            // 17: trusting.
+            p.u8(17).varint(8).bool(m.owner.is_some());
         }
         MobKind::Wolf => {
             // 17: sitting / tamed, 18: owner, 20: collar colour (red), 21: anger.
@@ -580,6 +634,9 @@ pub fn spawn(server: &Server, dim: Dimension, kind: MobKind, pos: [f64; 3]) -> i
         captain: false,
         charged: false,
         last_target: None,
+        raid_door: None,
+        explore: 0,
+        anchor: None,
         approach: 0.0,
         cover: None,
         grow: 0,
@@ -846,6 +903,9 @@ pub fn tick(server: &Arc<Server>, age: i64) {
     }
     if age % 1200 == 600 {
         super::pillagers::natural_patrols(server, &seen);
+    }
+    if age % 100 == 50 {
+        super::pillagers::outpost_garrison(server, &seen);
     }
     if age % 20 == 0 {
         super::doors::decay(server, age);
@@ -1144,7 +1204,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         let follow = f64::max(range * 1.25, 32.0);
         let eye = [m.pos[0], m.pos[1] + m.size().1 * 0.85, m.pos[2]];
         // Spiders only hunt in the dark (unless provoked).
-        let calm = kind == MobKind::Spider && m.angry == 0 && lit(world, m.pos, day);
+        let calm = matches!(kind, MobKind::Spider | MobKind::CaveSpider) && m.angry == 0 && lit(world, m.pos, day);
         let current = m.target.and_then(|e| seen.iter().find(|s| s.player.eid == e && s.targetable && dist2(&s.pos, &m.pos) < follow * follow));
         let current = match current {
             Some(s) if !(calm && entities::random() < 0.01) => {
@@ -1192,7 +1252,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         None
     };
     // A patrol fights together: whoever spots the player warns the others.
-    let target = if kind == MobKind::Pillager { target.or_else(|| super::pillagers::shared_target(m, group, seen)) } else { target };
+    let target = if matches!(kind, MobKind::Pillager | MobKind::Vindicator) { target.or_else(|| super::pillagers::shared_target(m, group, seen)) } else { target };
     m.target = target.map(|t| t.player.eid);
     if m.target.is_none() && m.angry > 0 {
         m.angry = 0;
@@ -1205,14 +1265,23 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         face(m, t.pos);
         let reach = 1.6 + m.size().0 / 2.0;
         match kind {
-            MobKind::Zombie | MobKind::Spider | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::WitherSkeleton | MobKind::Hoglin | MobKind::Enderman | MobKind::Endermite | MobKind::Wolf => {
+            MobKind::Zombie | MobKind::Spider | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::WitherSkeleton | MobKind::Hoglin | MobKind::Enderman | MobKind::Endermite | MobKind::Wolf | MobKind::Silverfish | MobKind::CaveSpider | MobKind::Vindicator => {
                 let speed = if kind == MobKind::Enderman { 0.15 } else { kind.speed() * 1.25 };
                 goal = Some((t.pos, speed));
                 if d < reach && dy < 2.5 && m.attack_cooldown == 0 {
-                    m.attack_cooldown = 20;
+                    // The vindicator's axe is heavy: slower blows on the easier difficulties.
+                    m.attack_cooldown = match (kind, server.config.difficulty) {
+                        (MobKind::Vindicator, 0 | 1) => 40,
+                        (MobKind::Vindicator, 2) => 30,
+                        _ => 20,
+                    };
                     actions.push(Action::Hurt(t.player.clone(), difficulty_damage(server, kind.melee()), "mob_attack", by.clone()));
                     if kind == MobKind::WitherSkeleton {
                         actions.push(Action::Effect(t.player.clone(), "wither", 0, 200));
+                    }
+                    // Cave spiders poison (7 s on normal, 15 s on hard).
+                    if kind == MobKind::CaveSpider && server.config.difficulty >= 2 {
+                        actions.push(Action::Effect(t.player.clone(), "poison", 0, if server.config.difficulty >= 3 { 300 } else { 140 }));
                     }
                     if kind == MobKind::Hoglin {
                         let dir = normalize([t.pos[0] - m.pos[0], 0.0, t.pos[2] - m.pos[2]]);
@@ -1287,7 +1356,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
                     actions.push(Action::Sound(m.eid, "entity.creeper.primed".into(), sound::HOSTILE));
                 }
                 if m.fuse.is_none() {
-                    goal = Some((t.pos, kind.speed()));
+                    goal = Some((creeper_approach(world, m, t), kind.speed() * 1.1));
                 }
             }
             MobKind::Blaze => {
@@ -1366,7 +1435,10 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
             }
         }
     } else {
-        m.fuse = None;
+        // (A creeper after a wolf keeps its fuse; see below.)
+        if kind != MobKind::Creeper || m.prey.is_none() {
+            m.fuse = None;
+        }
         if m.charging || m.burst != 0 {
             m.charging = false;
             m.burst = 0;
@@ -1458,9 +1530,73 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         return;
     }
 
-    // Patrol on the move (or waiting in formation).
+    // With no player in sight, creepers go for wolves and blow up next to them.
+    if kind == MobKind::Creeper && target.is_none() {
+        let current = m.prey.and_then(|e| others.iter().find(|o| o.eid == e && o.kind == MobKind::Wolf));
+        let wolf = current.or_else(|| others.iter().filter(|o| o.kind == MobKind::Wolf && dist2(&o.pos, &m.pos) < 16.0 * 16.0).min_by(|a, b| dist2(&a.pos, &m.pos).total_cmp(&dist2(&b.pos, &m.pos))));
+        match wolf {
+            Some(w) if dist2(&w.pos, &m.pos) < 20.0 * 20.0 => {
+                m.prey = Some(w.eid);
+                let d = dist2(&w.pos, &m.pos).sqrt();
+                face(m, w.pos);
+                match m.fuse {
+                    None if d < 3.0 => {
+                        m.fuse = Some(0);
+                        actions.push(Action::Sound(m.eid, "entity.creeper.primed".into(), sound::HOSTILE));
+                    }
+                    Some(_) if d > 7.0 => m.fuse = None,
+                    Some(f) => {
+                        m.fuse = Some(f + 1);
+                        if f + 1 >= 30 {
+                            m.health = 0.0;
+                            m.death_ticks = Some(20);
+                            actions.push(Action::Explode(m.dim, m.center(), if m.charged { 6.0 } else { 3.0 }, Attacker { eid: m.eid, name: "Creeper".into(), pos: Some(m.center()) }, false));
+                            return;
+                        }
+                    }
+                    None => {}
+                }
+                if m.fuse.is_none() {
+                    goal = Some((follow_path(world, m, w.pos), kind.speed() * 1.1));
+                } else {
+                    m.vel[0] = 0.0;
+                    m.vel[2] = 0.0;
+                    goal = Some((m.pos, 0.0));
+                }
+            }
+            _ => {
+                m.prey = None;
+            }
+        }
+    }
+
+    // Skeletons run from wolves, and creepers from cats and ocelots, before anything else.
+    let feared: &[MobKind] = match kind {
+        MobKind::Skeleton => &[MobKind::Wolf],
+        MobKind::Creeper => &[MobKind::Cat, MobKind::Ocelot],
+        _ => &[],
+    };
+    if !feared.is_empty() {
+        let range = if kind == MobKind::Creeper { 6.0 } else { 8.0 };
+        let wolf = others
+            .iter()
+            .filter(|o| feared.contains(&o.kind) && dist2(&o.pos, &m.pos) < range * range)
+            .min_by(|a, b| dist2(&a.pos, &m.pos).total_cmp(&dist2(&b.pos, &m.pos)));
+        if let Some(w) = wolf {
+            m.fuse = None;
+            let away = normalize([m.pos[0] - w.pos[0], 0.0, m.pos[2] - w.pos[2]]);
+            let dest = [m.pos[0] + away[0] * 8.0, m.pos[1], m.pos[2] + away[2] * 8.0];
+            m.drawing = 0;
+            goal = Some((follow_path(world, m, dest), kind.speed() * 1.5));
+        }
+    }
+
+    // Patrol on the move (or waiting in formation); the vindicator searches buildings.
     if kind == MobKind::Pillager && target.is_none() {
         goal = super::pillagers::patrol(world, m, group);
+    }
+    if kind == MobKind::Vindicator && target.is_none() {
+        goal = super::pillagers::vindicator(world, m, group);
     }
     // Animals: love, babies growing up, following food; tamed wolves.
     if super::animals::breeds(kind) {
@@ -1530,8 +1666,8 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         }
     }
 
-    // A zombie with a closed wooden door in its way breaks it.
-    if kind == MobKind::Zombie && goal.is_some() {
+    // A zombie or a vindicator with a closed wooden door in its way breaks it.
+    if matches!(kind, MobKind::Zombie | MobKind::Vindicator) && goal.is_some() {
         if let Some(door) = super::doors::in_the_way(world, m) {
             let age = server.age.load(Ordering::Relaxed);
             super::doors::hit(server, world, m, door, age, actions);
@@ -1552,8 +1688,17 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         let (dx, dz) = (g[0] - m.pos[0], g[2] - m.pos[2]);
         let len = (dx * dx + dz * dz).sqrt();
         if len > 0.1 {
-            m.vel[0] = dx / len * speed;
-            m.vel[2] = dz / len * speed;
+            let dir = [dx / len, dz / len];
+            // Careful fighters look before they step: no walking into lava or off a cliff while
+            // dodging, backing off or circling (they turn the other way instead).
+            if matches!(kind, MobKind::Skeleton | MobKind::Pillager | MobKind::Vindicator | MobKind::Creeper) && hazard_ahead(world, m.pos, dir) {
+                m.vel[0] = 0.0;
+                m.vel[2] = 0.0;
+                m.strafe = -m.strafe;
+            } else {
+                m.vel[0] = dir[0] * speed;
+                m.vel[2] = dir[1] * speed;
+            }
         }
     } else {
         m.vel[0] *= 0.5;
@@ -1730,7 +1875,7 @@ pub(super) fn follow_path(world: &mut World, m: &mut Mob, target: [f64; 3]) -> [
     if m.path_wait == 0 && (m.path.is_empty() || lost || moved) && PATH_BUDGET.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(1)).is_ok() {
         let (w, h) = m.size();
         // Zombies plan through wooden doors (they break them).
-        m.path = crate::world::pathfind::find(world, cell(m.pos), goal, w, h, 800, m.kind == MobKind::Zombie).unwrap_or_default().into();
+        m.path = crate::world::pathfind::find(world, cell(m.pos), goal, w, h, 800, path_profile(m.kind)).unwrap_or_default().into();
         m.path_goal = Some(goal);
         m.path_best = f64::MAX;
         // Unreachable target: do not search again on every tick.
@@ -1748,6 +1893,58 @@ pub(super) fn follow_path(world: &mut World, m: &mut Mob, target: [f64; 3]) -> [
             p
         }
         None => target,
+    }
+}
+
+/// Something nasty one step ahead: lava, fire, magma or dripstone at the feet or below, or a
+/// drop of more than 3 blocks onto anything but water.
+fn hazard_ahead(world: &mut World, pos: [f64; 3], dir: [f64; 2]) -> bool {
+    let reg = data::get();
+    let c = cell([pos[0] + dir[0] * 0.8, pos[1], pos[2] + dir[1] * 0.8]);
+    let name = |world: &mut World, y: i32| reg.block_of_state(world.get_block(BlockPos::new(c.x, y, c.z))).name.as_str();
+    for y in [c.y, c.y - 1] {
+        if matches!(name(world, y), "lava" | "fire" | "soul_fire" | "magma_block" | "pointed_dripstone" | "campfire" | "soul_campfire" | "powder_snow" | "cactus") {
+            return true;
+        }
+    }
+    let g = gameplay::get();
+    for dy in 1..=4 {
+        let s = world.get_block(BlockPos::new(c.x, c.y - dy, c.z));
+        if !g.shape(s).is_empty() || reg.block_of_state(s).name == "water" {
+            return false;
+        }
+    }
+    true
+}
+
+/// Where a creeper heads: if the player is looking its way it goes round to the side, and
+/// once beside it, in behind its back.
+fn creeper_approach(world: &mut World, m: &mut Mob, t: &Seen) -> [f64; 3] {
+    let look = normalize([t.look[0], 0.0, t.look[2]]);
+    let to_me = normalize([m.pos[0] - t.pos[0], 0.0, m.pos[2] - t.pos[2]]);
+    let d = dist2(&m.pos, &t.pos).sqrt();
+    let facing_me = look[0] * to_me[0] + look[2] * to_me[2] > 0.3;
+    let dest = if d < 3.5 {
+        t.pos
+    } else if facing_me {
+        // To its side (the side the creeper is already on), a little behind.
+        let perp = [-look[2], 0.0, look[0]];
+        let side = if perp[0] * to_me[0] + perp[2] * to_me[2] >= 0.0 { 1.0 } else { -1.0 };
+        [t.pos[0] + perp[0] * side * 5.0 - look[0] * 1.5, t.pos[1], t.pos[2] + perp[2] * side * 5.0 - look[2] * 1.5]
+    } else {
+        // Behind it.
+        [t.pos[0] - look[0] * 1.5, t.pos[1], t.pos[2] - look[2] * 1.5]
+    };
+    follow_path(world, m, dest)
+}
+
+/// How each kind moves: zombies and vindicators break doors; creepers keep out of the water
+/// unless it is the only way; ranged fighters and creepers keep away from hazards.
+fn path_profile(kind: MobKind) -> crate::world::pathfind::Profile {
+    crate::world::pathfind::Profile {
+        doors: matches!(kind, MobKind::Zombie | MobKind::Vindicator),
+        water: if kind == MobKind::Creeper { 80 } else { 16 },
+        hazards: matches!(kind, MobKind::Skeleton | MobKind::Pillager | MobKind::Vindicator | MobKind::Creeper),
     }
 }
 
@@ -1837,7 +2034,7 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
     if blocked && !m.kind.flies() {
         if wet {
             m.vel[1] = 0.3;
-        } else if m.kind == MobKind::Spider {
+        } else if matches!(m.kind, MobKind::Spider | MobKind::CaveSpider | MobKind::Cat | MobKind::Ocelot) {
             m.vel[1] = 0.2;
         } else if m.on_ground {
             if can_jump_over(world, m, want) {
@@ -1939,7 +2136,7 @@ pub fn attacked_by_player(server: &Arc<Server>, player: &Arc<Player>, eid: i32) 
         if kind.undead() {
             extra += 2.5 * w.enchantment("smite") as f32;
         }
-        if matches!(kind, MobKind::Spider | MobKind::Endermite) {
+        if matches!(kind, MobKind::Spider | MobKind::Endermite | MobKind::CaveSpider | MobKind::Silverfish) {
             extra += 2.5 * w.enchantment("bane_of_arthropods") as f32;
         }
     }
@@ -2028,7 +2225,7 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
                 m.fire = m.fire.max(1);
             }
             match m.kind {
-                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf | MobKind::Spider => {
+                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf | MobKind::Spider | MobKind::CaveSpider | MobKind::Vindicator => {
                     // A tamed wolf does not turn on anyone; a wild one calls its pack.
                     if let Some(p) = by_player.filter(|_| m.owner.is_none()) {
                         m.angry = 400 + (entities::random() * 400.0) as u32;
@@ -2053,6 +2250,11 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
             // It turned on someone: the client must know (raised arms, anger).
             if m.target != before_target {
                 server.broadcast_tracked(m.eid, &metadata(m), true);
+            }
+            // Cats and wolves fight back against the mob that attacked them.
+            if matches!(m.kind, MobKind::Cat | MobKind::Wolf) && by.is_some() && by_player.is_none() {
+                m.prey = by;
+                m.panic = 0;
             }
             let mut p = packet(id::play::DAMAGE_EVENT);
             let cause = by.map_or(0, |e| e + 1);
@@ -2303,7 +2505,9 @@ fn spawn_spot(world: &mut World, x: i32, z: i32, from_y: i32, room: i32) -> Opti
         let floor = world.get_block(BlockPos::new(x, y, z));
         let fb = reg.block_of_state(floor);
         let solid = g.shape(floor).len() == 1 && g.shape(floor)[0] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0] && !fb.name.ends_with("leaves") && !fb.name.contains("glass") && fb.name != "bedrock";
-        if solid && (1..=room).all(|dy| reg.is_air(world.get_block(BlockPos::new(x, y + dy, z)))) {
+        // Room above: nothing to bump into (grass and flowers are fine) and no liquid.
+        let free = |s: u16| g.shape(s).is_empty() && !matches!(reg.block_of_state(s).name.as_str(), "water" | "lava" | "fire" | "sweet_berry_bush" | "powder_snow");
+        if solid && (1..=room).all(|dy| free(world.get_block(BlockPos::new(x, y + dy, z)))) {
             return Some([x as f64 + 0.5, (y + 1) as f64, z as f64 + 0.5]);
         }
     }
@@ -2375,7 +2579,17 @@ fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
                 if server.config.spawn_animals && age % 200 == 0 && passive < PASSIVE_CAP && below == "grass_block" {
                     let biome = world.generator().biome_name(x, z);
                     let wolves = (biome.contains("forest") || biome.contains("taiga") || biome == "grove") && entities::random() < 0.25;
-                    let kind = if wolves { MobKind::Wolf } else { [MobKind::Cow, MobKind::Pig, MobKind::Sheep, MobKind::Chicken][(entities::random() * 4.0) as usize % 4] };
+                    let ocelots = biome.contains("jungle") && entities::random() < 0.3;
+                    let cats = !world.generator().village_centers_near(x, z, 48).is_empty() && entities::random() < 0.3;
+                    let kind = if wolves {
+                        MobKind::Wolf
+                    } else if ocelots {
+                        MobKind::Ocelot
+                    } else if cats {
+                        MobKind::Cat
+                    } else {
+                        [MobKind::Cow, MobKind::Pig, MobKind::Sheep, MobKind::Chicken][(entities::random() * 4.0) as usize % 4]
+                    };
                     for i in 0..2 + (entities::random() * 2.0) as i32 {
                         to_spawn.push((s.dim, kind, [spot[0] + i as f64 * 0.7, spot[1], spot[2]]));
                     }
@@ -2391,20 +2605,13 @@ fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
                 }
                 let Some(spot) = spawn_spot(&mut world, x, z, s.pos[1] as i32, 2) else { continue };
                 let below = data::get().block_of_state(world.get_block(BlockPos::new(x, spot[1] as i32 - 1, z))).name.clone();
-                let kind = if below.starts_with("soul_s") {
-                    pick(&[(MobKind::Skeleton, 20), (MobKind::Ghast, 50), (MobKind::Blaze, 10), (MobKind::Enderman, 1)])
+                // Blazes and wither skeletons only spawn in fortresses (like vanilla).
+                let kind = if world.generator().in_structure("fortress", x, spot[1] as i32, z) {
+                    pick(&[(MobKind::Blaze, 10), (MobKind::WitherSkeleton, 8), (MobKind::Skeleton, 2), (MobKind::ZombifiedPiglin, 5), (MobKind::MagmaCube, 3)])
+                } else if below.starts_with("soul_s") {
+                    pick(&[(MobKind::Skeleton, 20), (MobKind::Ghast, 50), (MobKind::Enderman, 1)])
                 } else {
-                    // Without fortresses, blazes and wither skeletons spawn (sparsely) across the whole Nether.
-                    pick(&[
-                        (MobKind::ZombifiedPiglin, 100),
-                        (MobKind::Piglin, 15),
-                        (MobKind::MagmaCube, 4),
-                        (MobKind::Ghast, 30),
-                        (MobKind::Hoglin, 9),
-                        (MobKind::Blaze, 8),
-                        (MobKind::WitherSkeleton, 4),
-                        (MobKind::Enderman, 1),
-                    ])
+                    pick(&[(MobKind::ZombifiedPiglin, 100), (MobKind::Piglin, 15), (MobKind::MagmaCube, 4), (MobKind::Ghast, 30), (MobKind::Hoglin, 9), (MobKind::Enderman, 1)])
                 };
                 // The ghast needs a lot of room and spawns floating.
                 let spot = if kind == MobKind::Ghast {

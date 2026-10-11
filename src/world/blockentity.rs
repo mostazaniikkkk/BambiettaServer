@@ -13,6 +13,8 @@ pub enum BlockEntity {
     Sign(Sign),
     /// Banner layers: (pattern code, dye color).
     Banner(Vec<(String, i32)>),
+    /// Mob spawner: which mob, and ticks until the next spawn.
+    Spawner { mob: String, delay: i32 },
 }
 
 /// Brewing stand: 0-2 bottles, 3 ingredient, 4 blaze powder.
@@ -149,7 +151,7 @@ impl BlockEntity {
             BlockEntity::Container(items) => items.iter().flatten().cloned().collect(),
             BlockEntity::Furnace(f) => f.items.iter().flatten().cloned().collect(),
             BlockEntity::Brewing(b) => b.items.iter().flatten().cloned().collect(),
-            BlockEntity::Sign(_) | BlockEntity::Banner(_) => vec![],
+            BlockEntity::Sign(_) | BlockEntity::Banner(_) | BlockEntity::Spawner { .. } => vec![],
         }
     }
 
@@ -158,6 +160,8 @@ impl BlockEntity {
         match self {
             BlockEntity::Sign(s) => Some(s.to_nbt()),
             BlockEntity::Banner(p) if !p.is_empty() => Some(banner_nbt(p)),
+            // The mob that spins inside the cage.
+            BlockEntity::Spawner { mob, .. } => Some(Nbt::compound().with("SpawnData", Nbt::compound().with("entity", Nbt::compound().with("id", Nbt::str(&format!("minecraft:{mob}")))))),
             _ => None,
         }
     }

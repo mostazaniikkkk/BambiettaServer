@@ -79,6 +79,41 @@ impl Generator {
         }
     }
 
+    /// Stronghold centres (normal overworld only; for eyes of ender).
+    pub fn strongholds(&self) -> Vec<(i32, i32)> {
+        match self {
+            Generator::Overworld(g) => g.strongholds().to_vec(),
+            _ => vec![],
+        }
+    }
+
+    /// Nearest structure of a kind (`stronghold`, `dungeon`, `village`) to (x, z): a point
+    /// of it (the spawner for dungeons).
+    pub fn locate(&self, kind: &str, x: i32, z: i32) -> Option<(i32, i32, i32)> {
+        if let Generator::Nether(n) = self {
+            return (kind == "fortress").then(|| n.nearest_fortress(x, z, 6)).flatten();
+        }
+        let Generator::Overworld(g) = self else { return None };
+        match kind {
+            "pyramid" => g.nearest_feature(Feature::Pyramid, x, z, 8),
+            "outpost" => g.nearest_feature(Feature::Outpost, x, z, 8),
+            "stronghold" => g.strongholds().iter().min_by_key(|(sx, sz)| ((*sx - x) as i64).pow(2) + ((*sz - z) as i64).pow(2)).map(|&(sx, sz)| (sx, g.stronghold_floor(sx, sz), sz)),
+            "village" => g.village_centers_near(x, z, 2000).into_iter().min_by_key(|(vx, vz)| ((*vx - x) as i64).pow(2) + ((*vz - z) as i64).pow(2)).map(|(vx, vz)| (vx, g.height(vx, vz), vz)),
+            "dungeon" => g.dungeon_near(x, z, 24),
+            _ => None,
+        }
+    }
+
+    /// Whether a point is inside a structure where special mobs spawn (`fortress` in the
+    /// Nether, `outpost` in the Overworld).
+    pub fn in_structure(&self, kind: &str, x: i32, y: i32, z: i32) -> bool {
+        match (self, kind) {
+            (Generator::Nether(n), "fortress") => n.in_fortress(x, y, z),
+            (Generator::Overworld(g), "outpost") => g.in_feature(Feature::Outpost, x, z, 24),
+            _ => false,
+        }
+    }
+
     /// Wells of nearby villages (normal overworld only).
     pub fn village_centers_near(&self, x: i32, z: i32, radius: i32) -> Vec<(i32, i32)> {
         match self {
@@ -358,6 +393,27 @@ pub struct Overworld {
     noise: Noise,
     b: Blocks,
     villages: Mutex<HashMap<(i32, i32), Arc<Vec<(i32, i32, i32, u16)>>>>,
+    /// Stronghold centres, and their layouts once computed.
+    strongholds: Vec<(i32, i32)>,
+    stronghold_cache: Mutex<HashMap<usize, Arc<super::structures::Structure>>>,
+    /// Surface structures by (kind, region): desert pyramids and pillager outposts.
+    features: Mutex<HashMap<(Feature, i32, i32), Option<Arc<super::structures::Structure>>>>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum Feature {
+    Pyramid,
+    Outpost,
+}
+
+impl Feature {
+    /// (region size in chunks, salt)
+    fn placement(self) -> (i32, u64) {
+        match self {
+            Feature::Pyramid => (24, 0xDE5E),
+            Feature::Outpost => (30, 0x0075),
+        }
+    }
 }
 
 /// States used for each fill block (precomputed).
@@ -421,7 +477,141 @@ impl Overworld {
                 ],
             },
             villages: Mutex::new(HashMap::new()),
+            strongholds: super::structures::stronghold_positions(seed),
+            stronghold_cache: Mutex::new(HashMap::new()),
+            features: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// The surface structure of a kind in region (rx, rz), if the terrain there suits it.
+    fn feature(&self, kind: Feature, rx: i32, rz: i32) -> Option<Arc<super::structures::Structure>> {
+        if let Some(f) = self.features.lock().unwrap().get(&(kind, rx, rz)) {
+            return f.clone();
+        }
+        let (region, salt) = kind.placement();
+        let (x, z, r) = super::structures::region_spot(self.seed, salt, region, rx, rz);
+        let cl = self.climate(x, z);
+        let g = self.height_from(&cl, x, z);
+        let biome = self.biome(&cl, g);
+        let heights: Vec<i32> = [(-10, -10), (10, -10), (-10, 10), (10, 10), (0, 0)].iter().map(|(dx, dz)| self.height(x + dx, z + dz)).collect();
+        let flat = heights.iter().max().unwrap() - heights.iter().min().unwrap();
+        use Biome::*;
+        let built = match kind {
+            Feature::Pyramid if biome == Desert && flat <= 5 && g > SEA_LEVEL => Some(super::structures::desert_pyramid(x, z, *heights.iter().min().unwrap())),
+            Feature::Outpost
+                if matches!(biome, Plains | SunflowerPlains | Savanna | Desert | Taiga | SnowyPlains) && flat <= 6 && g > SEA_LEVEL && (r >> 40) % 3 != 0 && self.village_centers_near(x, z, 200).is_empty() =>
+            {
+                Some(super::structures::outpost(x, z, g))
+            }
+            _ => None,
+        }
+        .map(Arc::new);
+        self.features.lock().unwrap().insert((kind, rx, rz), built.clone());
+        built
+    }
+
+    /// Surface structures whose area touches chunk (cx, cz).
+    fn features_near(&self, cx: i32, cz: i32) -> Vec<Arc<super::structures::Structure>> {
+        let mut out = Vec::new();
+        for kind in [Feature::Pyramid, Feature::Outpost] {
+            let (region, salt) = kind.placement();
+            let (rx, rz) = (cx.div_euclid(region), cz.div_euclid(region));
+            for dx in -1..=1 {
+                for dz in -1..=1 {
+                    let (x, z, _) = super::structures::region_spot(self.seed, salt, region, rx + dx, rz + dz);
+                    if (x - (cx * 16 + 8)).abs() > 40 || (z - (cz * 16 + 8)).abs() > 40 {
+                        continue;
+                    }
+                    if let Some(f) = self.feature(kind, rx + dx, rz + dz) {
+                        out.push(f);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Nearest surface structure of a kind within `regions` regions: its centre.
+    pub fn nearest_feature(&self, kind: Feature, x: i32, z: i32, regions: i32) -> Option<(i32, i32, i32)> {
+        let (region, salt) = kind.placement();
+        let (rx, rz) = ((x >> 4).div_euclid(region), (z >> 4).div_euclid(region));
+        let mut best: Option<(i64, (i32, i32, i32))> = None;
+        for dx in -regions..=regions {
+            for dz in -regions..=regions {
+                if self.feature(kind, rx + dx, rz + dz).is_none() {
+                    continue;
+                }
+                let (fx, fz, _) = super::structures::region_spot(self.seed, salt, region, rx + dx, rz + dz);
+                let d = ((fx - x) as i64).pow(2) + ((fz - z) as i64).pow(2);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, (fx, self.height(fx, fz), fz)));
+                }
+            }
+        }
+        best.map(|b| b.1)
+    }
+
+    /// Whether (x, z) lies within a structure of that kind (with some margin around it).
+    pub fn in_feature(&self, kind: Feature, x: i32, z: i32, margin: i32) -> bool {
+        self.features_near(x >> 4, z >> 4).iter().any(|f| {
+            f.bounds.is_some_and(|(lo, hi)| x >= lo.x - margin && x <= hi.x + margin && z >= lo.z - margin && z <= hi.z + margin)
+                && self.feature_kind_matches(f, kind)
+        })
+    }
+
+    fn feature_kind_matches(&self, f: &super::structures::Structure, kind: Feature) -> bool {
+        // Pyramids have chests from the desert table, outposts from the outpost one.
+        let loot = match kind {
+            Feature::Pyramid => super::structures::Loot::DesertPyramid,
+            Feature::Outpost => super::structures::Loot::Outpost,
+        };
+        f.chests.iter().any(|c| c.1 == loot)
+    }
+
+    pub fn strongholds(&self) -> &[(i32, i32)] {
+        &self.strongholds
+    }
+
+    /// Floor height of the stronghold at (x, z): deep enough under the lowest ground around.
+    pub fn stronghold_floor(&self, x: i32, z: i32) -> i32 {
+        let ground = [(0, 0), (40, 0), (-40, 0), (0, 40), (0, -40)].iter().map(|(dx, dz)| self.height(x + dx, z + dz)).min().unwrap_or(40);
+        (ground - 30).clamp(-40, 20)
+    }
+
+    /// The spawner of the nearest dungeon within `radius` chunks.
+    pub fn dungeon_near(&self, x: i32, z: i32, radius: i32) -> Option<(i32, i32, i32)> {
+        let (cx0, cz0) = (x >> 4, z >> 4);
+        for r in 0..=radius {
+            for dx in -r..=r {
+                for dz in -r..=r {
+                    if dx.abs() != r && dz.abs() != r {
+                        continue;
+                    }
+                    let (cx, cz) = (cx0 + dx, cz0 + dz);
+                    let (x0, z0) = (cx * 16, cz * 16);
+                    let surface = [(0, 0), (15, 0), (0, 15), (15, 15)].iter().map(|(a, b)| self.height(x0 + a, z0 + b)).min().unwrap_or(SEA_LEVEL);
+                    if let Some(d) = super::structures::dungeon(self.seed, cx, cz, surface) {
+                        return d.spawners.first().map(|s| (s.0.x, s.0.y, s.0.z));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Strongholds whose area touches chunk (cx, cz).
+    fn strongholds_near(&self, cx: i32, cz: i32) -> Vec<Arc<super::structures::Structure>> {
+        let mut out = Vec::new();
+        for (i, &(x, z)) in self.strongholds.iter().enumerate() {
+            let (bx, bz) = (cx * 16 + 8, cz * 16 + 8);
+            if (x - bx).abs() > 64 || (z - bz).abs() > 64 {
+                continue;
+            }
+            let mut cache = self.stronghold_cache.lock().unwrap();
+            let s = cache.entry(i).or_insert_with(|| Arc::new(super::structures::stronghold(self.seed, x, z, self.stronghold_floor(x, z))));
+            out.push(s.clone());
+        }
+        out
     }
 
     pub fn climate(&self, x: i32, z: i32) -> Climate {
@@ -617,6 +807,18 @@ impl Overworld {
                     c.set((bx - x0) as usize, by, (bz - z0) as usize, s);
                 }
             }
+        }
+        // 6. Surface structures: desert pyramids, pillager outposts.
+        for f in self.features_near(cx, cz) {
+            f.apply(&mut c, cx, cz, self.seed);
+        }
+        // 7. Underground structures: dungeons and strongholds.
+        let surface = [(0, 0), (15, 0), (0, 15), (15, 15)].iter().map(|(dx, dz)| self.height(x0 + dx, z0 + dz)).min().unwrap_or(SEA_LEVEL);
+        if let Some(d) = super::structures::dungeon(self.seed, cx, cz, surface) {
+            d.apply(&mut c, cx, cz, self.seed);
+        }
+        for s in self.strongholds_near(cx, cz) {
+            s.apply(&mut c, cx, cz, self.seed);
         }
         c
     }
@@ -1173,11 +1375,67 @@ impl Overworld {
 pub struct NetherGen {
     seed: u64,
     noise: Noise,
+    fortresses: Mutex<HashMap<(i32, i32), Option<Arc<super::structures::Structure>>>>,
 }
+
+/// Nether fortresses: one in two of every three regions of 20x20 chunks, deck at y 66.
+const FORTRESS_REGION: i32 = 20;
+const FORTRESS_Y: i32 = 66;
 
 impl NetherGen {
     fn new(seed: u64) -> Self {
-        Self { seed: seed ^ 0x6e65_7468, noise: Noise { seed: seed ^ 0x6e65_7468 } }
+        Self { seed: seed ^ 0x6e65_7468, noise: Noise { seed: seed ^ 0x6e65_7468 }, fortresses: Mutex::new(HashMap::new()) }
+    }
+
+    fn fortress(&self, rx: i32, rz: i32) -> Option<Arc<super::structures::Structure>> {
+        let mut cache = self.fortresses.lock().unwrap();
+        cache
+            .entry((rx, rz))
+            .or_insert_with(|| {
+                let (x, z, r) = super::structures::region_spot(self.seed, 0xF0F0, FORTRESS_REGION, rx, rz);
+                ((r >> 40) % 3 != 0).then(|| Arc::new(super::structures::nether_fortress(self.seed, x, z, FORTRESS_Y)))
+            })
+            .clone()
+    }
+
+    fn fortresses_near(&self, cx: i32, cz: i32) -> Vec<Arc<super::structures::Structure>> {
+        let (rx, rz) = (cx.div_euclid(FORTRESS_REGION), cz.div_euclid(FORTRESS_REGION));
+        let mut out = Vec::new();
+        for dx in -1..=1 {
+            for dz in -1..=1 {
+                let (x, z, _) = super::structures::region_spot(self.seed, 0xF0F0, FORTRESS_REGION, rx + dx, rz + dz);
+                if (x - (cx * 16 + 8)).abs() > 72 || (z - (cz * 16 + 8)).abs() > 72 {
+                    continue;
+                }
+                if let Some(f) = self.fortress(rx + dx, rz + dz) {
+                    out.push(f);
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether (x, y, z) is inside a fortress (with some margin).
+    pub fn in_fortress(&self, x: i32, y: i32, z: i32) -> bool {
+        self.fortresses_near(x >> 4, z >> 4).iter().any(|f| f.bounds.is_some_and(|(lo, hi)| x >= lo.x - 2 && x <= hi.x + 2 && z >= lo.z - 2 && z <= hi.z + 2 && y >= FORTRESS_Y - 4 && y <= hi.y + 2))
+    }
+
+    pub fn nearest_fortress(&self, x: i32, z: i32, regions: i32) -> Option<(i32, i32, i32)> {
+        let (rx, rz) = ((x >> 4).div_euclid(FORTRESS_REGION), (z >> 4).div_euclid(FORTRESS_REGION));
+        let mut best: Option<(i64, (i32, i32, i32))> = None;
+        for dx in -regions..=regions {
+            for dz in -regions..=regions {
+                if self.fortress(rx + dx, rz + dz).is_none() {
+                    continue;
+                }
+                let (fx, fz, _) = super::structures::region_spot(self.seed, 0xF0F0, FORTRESS_REGION, rx + dx, rz + dz);
+                let d = ((fx - x) as i64).pow(2) + ((fz - z) as i64).pow(2);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, (fx, FORTRESS_Y, fz)));
+                }
+            }
+        }
+        best.map(|b| b.1)
     }
 
     fn generate(&self, cx: i32, cz: i32) -> Chunk {
@@ -1245,6 +1503,9 @@ impl NetherGen {
                     }
                 }
             }
+        }
+        for f in self.fortresses_near(cx, cz) {
+            f.apply(&mut c, cx, cz, self.seed);
         }
         c
     }

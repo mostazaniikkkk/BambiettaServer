@@ -311,6 +311,7 @@ async fn handle_packet(
                 || super::signs::read_book(player, hand)
                 || super::maps::use_empty_map(server, player, hand)
                 || super::vehicles::use_boat(server, player, hand)
+                || super::eyes::throw(server, player, hand)
                 || super::projectiles::throw_held(server, player, hand)
                 || super::fishing::use_rod(server, player, hand)
                 || super::ranged::start(server, player, hand);

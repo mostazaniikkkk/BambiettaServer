@@ -376,10 +376,16 @@ await step('ataques: blaze y ghast disparan', async () => {
 })
 
 await step('perla de ender, manzana dorada y cubo de magma', async () => {
-  a.chat('/gamemode survival'); a.chat(`/tp ${O.x + 0.5} 100 ${O.z + 0.5}`); await sleep(500)
+  // A clean platform of its own (earlier steps leave things around O).
+  a.chat('/gamemode creative'); a.chat(`/tp ${O.x + 0.5} 182 ${O.z + 60.5}`); await sleep(1500)
+  a.chat(`/fill ${O.x - 16} 179 ${O.z + 44} ${O.x + 16} 179 ${O.z + 76} stone`)
+  a.chat(`/fill ${O.x - 16} 180 ${O.z + 44} ${O.x + 16} 186 ${O.z + 76} air`); await sleep(500)
+  a.chat('/gamemode survival'); a.chat(`/tp ${O.x + 0.5} 180 ${O.z + 60.5}`); await sleep(500)
   await give('ender_pearl'); await a.equip(slotOf('ender_pearl'), 'hand')
+  a.chat('/killmobs all 40'); a.chat('/heal'); await sleep(300)
   const p0 = a.entity.position.clone()
-  await a.look(Math.PI / 2, -0.3, true)
+  await a.look(-Math.PI / 2, -0.3, true)
+  await sleep(150) // mineflayer sends the rotation on its next tick; the throw goes out at once
   a.activateItem(); await sleep(100); a.deactivateItem()
   check(await until(() => a.entity.position.distanceTo(p0) > 4, 4000), `la perla teletransporta (${p0.distanceTo(a.entity.position).toFixed(1)} bloques)`)
   a.chat('/heal'); await sleep(200)

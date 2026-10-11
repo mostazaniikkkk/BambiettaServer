@@ -24,6 +24,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "gamemode", usage: "/gamemode <modo> [jugador]", help: "Cambiar modo de juego", op: true, run: gamemode },
     Command { name: "gm", usage: "/gm <0-3> [jugador]", help: "Alias de /gamemode", op: true, run: gamemode },
     Command { name: "tp", usage: "/tp <x y z> | <jugador> | <jugador> <destino>", help: "Teletransportar", op: true, run: tp },
+    Command { name: "locate", usage: "/locate <stronghold|dungeon|village|pyramid|outpost|fortress>", help: "Buscar la estructura más cercana", op: true, run: locate },
     Command { name: "weather", usage: "/weather <clear|rain|thunder> [segundos]", help: "Cambiar el clima", op: true, run: weather },
     Command { name: "time", usage: "/time set <day|noon|night|midnight|ticks> | /time add <ticks>", help: "Cambiar la hora", op: true, run: time },
     Command { name: "say", usage: "/say <mensaje>", help: "Anuncio global", op: true, run: say },
@@ -181,6 +182,26 @@ fn tp(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
     super::play::teleport(s, &who, dest.0, dest.1, dest.2);
     p.message(&format!("§aTeletransportado {} a {:.1} {:.1} {:.1}", who.name, dest.0, dest.1, dest.2));
     Ok(())
+}
+
+fn locate(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
+    let kind = args.split_whitespace().next().ok_or_default()?;
+    if !matches!(kind, "stronghold" | "dungeon" | "village" | "pyramid" | "outpost" | "fortress") {
+        return Err(format!("Estructura desconocida: {kind}"));
+    }
+    let (x, z) = {
+        let st = p.state.lock().unwrap();
+        (st.x.floor() as i32, st.z.floor() as i32)
+    };
+    let found = s.world(p.dim()).lock().unwrap().generator().locate(kind, x, z);
+    match found {
+        Some((fx, fy, fz)) => {
+            let d = (((fx - x) as f64).powi(2) + ((fz - z) as f64).powi(2)).sqrt();
+            p.message(&format!("§a{kind}: §f{fx} {fy} {fz} §7({d:.0} bloques)"));
+            Ok(())
+        }
+        None => Err(format!("No hay ningún {kind} cerca")),
+    }
 }
 
 fn weather(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {

@@ -6,7 +6,12 @@
 //! - Animals follow a player holding their food.
 //! - Wolves: tamed with bones (1 in 3). A tamed wolf sits or stands when its owner uses it,
 //!   follows the owner (teleporting when left behind), attacks whatever the owner hits or
-//!   whatever hurts the owner, and heals with meat.
+//!   whatever hurts the owner, and heals with meat. Wolves, wild or tamed, hunt skeletons
+//!   above anything else and bite them for double damage.
+//! - Cats (villages): tamed with raw cod or salmon (1 in 3); they sit and follow like wolves.
+//!   Ocelots (jungles) run from players until fed fish, then trust them. Creepers fear both.
+//! - Who hunts whom: cats go for creepers, stray cats fight each other, wild wolves go for
+//!   cats; a cat or a wolf attacked by another mob fights back.
 
 use super::mobs::{self, Action, Mob, MobKind, Seen};
 use super::{entities, Player, Server};
@@ -27,14 +32,16 @@ pub struct Other {
     pub pos: [f64; 3],
     pub love: u32,
     pub grow: i32,
+    /// Has an owner (tamed).
+    pub tame: bool,
 }
 
 pub fn snapshot<'a>(mobs: impl Iterator<Item = &'a Mob>) -> Vec<Other> {
-    mobs.filter(|m| m.death_ticks.is_none()).map(|m| Other { eid: m.eid, kind: m.kind, pos: m.pos, love: m.love, grow: m.grow }).collect()
+    mobs.filter(|m| m.death_ticks.is_none()).map(|m| Other { eid: m.eid, kind: m.kind, pos: m.pos, love: m.love, grow: m.grow, tame: m.owner.is_some() }).collect()
 }
 
 pub fn breeds(kind: MobKind) -> bool {
-    matches!(kind, MobKind::Cow | MobKind::Pig | MobKind::Sheep | MobKind::Chicken | MobKind::Wolf)
+    matches!(kind, MobKind::Cow | MobKind::Pig | MobKind::Sheep | MobKind::Chicken | MobKind::Wolf | MobKind::Cat | MobKind::Ocelot)
 }
 
 /// Food that makes an animal fall in love (and that it follows).
@@ -44,6 +51,7 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
         MobKind::Pig => matches!(item, "carrot" | "potato" | "beetroot"),
         MobKind::Chicken => matches!(item, "wheat_seeds" | "melon_seeds" | "pumpkin_seeds" | "beetroot_seeds" | "torchflower_seeds"),
         MobKind::Wolf => is_meat(item),
+        MobKind::Cat | MobKind::Ocelot => matches!(item, "cod" | "salmon"),
         _ => false,
     }
 }
@@ -70,8 +78,22 @@ pub fn behave(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], a
         m.grow -= 1;
     }
     let speed = m.kind.walk_speed();
-    if m.kind == MobKind::Wolf && m.owner.is_some() {
+    // A wild ocelot runs from players (unless they hold fish).
+    if m.kind == MobKind::Ocelot && m.owner.is_none() {
+        let near = seen.iter().filter(|s| s.present && !s.hands.iter().any(|h| matches!(*h, "cod" | "salmon")) && mobs::dist2(&s.pos, &m.pos) < 8.0 * 8.0).min_by(|a, b| mobs::dist2(&a.pos, &m.pos).total_cmp(&mobs::dist2(&b.pos, &m.pos)));
+        if let Some(s) = near {
+            let away = mobs::normalize([m.pos[0] - s.pos[0], 0.0, m.pos[2] - s.pos[2]]);
+            let dest = [m.pos[0] + away[0] * 8.0, m.pos[1], m.pos[2] + away[2] * 8.0];
+            return Some((mobs::follow_path(world, m, dest), m.kind.walk_speed() * 1.8));
+        }
+    }
+    if matches!(m.kind, MobKind::Wolf | MobKind::Cat) && m.owner.is_some() {
         if let Some(g) = tamed_wolf(world, m, seen, others, actions) {
+            return Some(g);
+        }
+    } else if matches!(m.kind, MobKind::Wolf | MobKind::Cat) && m.target.is_none() {
+        // Wild wolves and stray cats hunt too.
+        if let Some(g) = hunt(world, m, others, actions) {
             return Some(g);
         }
     }
@@ -118,6 +140,54 @@ pub fn behave(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], a
     None
 }
 
+/// What a hunter goes for, best first: wolves (wild or tamed) want skeletons above all, and
+/// wild wolves also cats; cats want creepers, and stray cats fight each other.
+fn wants(m: &Mob, o: &Other) -> Option<u8> {
+    match (m.kind, o.kind) {
+        (MobKind::Wolf, MobKind::Skeleton) => Some(0),
+        (MobKind::Wolf, MobKind::Cat) if m.owner.is_none() => Some(1),
+        (MobKind::Cat, MobKind::Creeper) => Some(0),
+        (MobKind::Cat, MobKind::Cat) if m.owner.is_none() && !o.tame && o.eid != m.eid => Some(1),
+        _ => None,
+    }
+}
+
+/// A wolf or a cat goes for its prey: what it is fighting already (its owner's enemy, or
+/// whoever attacked it) unless something it wants more is close (see `wants`). Wolves bite
+/// skeletons for double damage.
+fn hunt(world: &mut World, m: &mut Mob, others: &[Other], actions: &mut Vec<Action>) -> Option<([f64; 3], f64)> {
+    let best = others
+        .iter()
+        .filter_map(|o| wants(m, o).map(|w| (w, o)))
+        .filter(|(_, o)| mobs::dist2(&o.pos, &m.pos) < 14.0 * 14.0)
+        .min_by(|a, b| a.0.cmp(&b.0).then(mobs::dist2(&a.1.pos, &m.pos).total_cmp(&mobs::dist2(&b.1.pos, &m.pos))));
+    let current = m.prey.and_then(|e| others.iter().find(|o| o.eid == e)).filter(|o| mobs::dist2(&o.pos, &m.pos) < 24.0 * 24.0);
+    let prey = match (current, best) {
+        // The favourite (rank 0) wins over anything else.
+        (Some(c), Some((0, b))) if wants(m, c) != Some(0) => Some(b),
+        (Some(c), _) => Some(c),
+        (None, Some((_, b))) => Some(b),
+        (None, None) => None,
+    };
+    let Some(prey) = prey else {
+        m.prey = None;
+        return None;
+    };
+    m.prey = Some(prey.eid);
+    let d = mobs::dist2(&prey.pos, &m.pos).sqrt();
+    mobs::face(m, prey.pos);
+    if d < 1.8 && m.attack_cooldown == 0 {
+        m.attack_cooldown = 20;
+        let bite = match (m.kind, prey.kind) {
+            (MobKind::Wolf, MobKind::Skeleton) => 8.0,
+            (MobKind::Wolf, _) => 4.0,
+            _ => 3.0,
+        };
+        actions.push(Action::HurtMob(prey.eid, bite, m.eid));
+    }
+    Some((mobs::follow_path(world, m, prey.pos), m.kind.walk_speed() * 1.4))
+}
+
 /// A tamed wolf: sits, fights its owner's enemies, follows the owner.
 fn tamed_wolf(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], actions: &mut Vec<Action>) -> Option<([f64; 3], f64)> {
     let speed = m.kind.walk_speed();
@@ -127,17 +197,23 @@ fn tamed_wolf(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], a
         m.prey = None;
         return Some((m.pos, 0.0));
     }
-    // Its owner's enemy.
-    if let Some(prey) = m.prey.and_then(|e| others.iter().find(|o| o.eid == e)).filter(|o| mobs::dist2(&o.pos, &m.pos) < 24.0 * 24.0) {
-        let d = mobs::dist2(&prey.pos, &m.pos).sqrt();
-        mobs::face(m, prey.pos);
-        if d < 1.8 && m.attack_cooldown == 0 {
-            m.attack_cooldown = 20;
-            actions.push(Action::HurtMob(prey.eid, 4.0, m.eid));
-        }
-        return Some((mobs::follow_path(world, m, prey.pos), speed * 1.4));
+    // Its owner's enemy, or its favourite prey.
+    if let Some(g) = hunt(world, m, others, actions) {
+        return Some(g);
     }
-    m.prey = None;
+    // A tamed cat with a bed within 20 blocks stays around it instead of following.
+    if m.kind == MobKind::Cat {
+        if (m.age as i32 + m.eid) % 100 == 0 {
+            m.anchor = find_bed(world, m.pos, 20);
+        }
+        if let Some(bed) = m.anchor {
+            if mobs::dist2(&bed, &m.pos) > 6.0 * 6.0 {
+                return Some((mobs::follow_path(world, m, bed), speed));
+            }
+            // Close enough: it strolls around (the generic wander), coming back when it strays.
+            return None;
+        }
+    }
     let owner = seen.iter().find(|s| Some(s.player.uuid) == m.owner)?;
     let d = mobs::dist2(&owner.pos, &m.pos).sqrt();
     if d > 12.0 {
@@ -152,6 +228,27 @@ fn tamed_wolf(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], a
         return Some((mobs::follow_path(world, m, owner.pos), speed * 1.4));
     }
     None
+}
+
+/// The nearest bed within `r` blocks (centre of its foot block).
+fn find_bed(world: &mut World, p: [f64; 3], r: i32) -> Option<[f64; 3]> {
+    let reg = crate::data::get();
+    let (cx, cy, cz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+    let mut best: Option<(i32, [f64; 3])> = None;
+    for dx in -r..=r {
+        for dz in -r..=r {
+            for dy in -4..=4 {
+                let q = crate::protocol::BlockPos::new(cx + dx, cy + dy, cz + dz);
+                if reg.block_of_state(world.get_block(q)).name.ends_with("_bed") {
+                    let d = dx * dx + dz * dz + dy * dy;
+                    if best.is_none_or(|b| d < b.0) {
+                        best = Some((d, [q.x as f64 + 0.5, q.y as f64, q.z as f64 + 0.5]));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|b| b.1)
 }
 
 /// Right click on an animal. Returns whether something happened (so nothing else does).
@@ -195,6 +292,32 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32,
                 out.push((mobs::metadata(m), true));
                 true
             }
+            // Taming a stray cat, or winning an ocelot's trust, with raw fish.
+            (MobKind::Cat | MobKind::Ocelot, Some("cod" | "salmon")) if m.owner.is_none() => {
+                eat = true;
+                if entities::random() < 1.0 / 3.0 {
+                    m.owner = Some(player.uuid);
+                    m.sitting = m.kind == MobKind::Cat;
+                    out.push((status(m.eid, 7), true));
+                } else {
+                    out.push((status(m.eid, 6), true));
+                }
+                out.push((mobs::metadata(m), true));
+                true
+            }
+            // Own cat: fish makes it fall in love; anything else sits / stands up.
+            (MobKind::Cat, h) if mine => {
+                if h.is_some_and(|h| matches!(h, "cod" | "salmon")) && m.grow == 0 && m.love == 0 {
+                    eat = true;
+                    m.love = LOVE;
+                    m.love_by = Some(player.eid);
+                } else {
+                    m.sitting = !m.sitting;
+                    m.path.clear();
+                    out.push((mobs::metadata(m), true));
+                }
+                true
+            }
             // Own wolf: meat heals (or makes it fall in love), anything else sits / stands up.
             (MobKind::Wolf, h) if mine => {
                 if h.is_some_and(is_meat) && m.health < m.max_health() {
@@ -212,7 +335,7 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32,
                 }
                 true
             }
-            (k, Some(h)) if breeds(k) && k != MobKind::Wolf && is_food(k, h) => {
+            (k, Some(h)) if breeds(k) && !matches!(k, MobKind::Wolf | MobKind::Cat) && is_food(k, h) => {
                 if m.grow < 0 {
                     // A baby grows 10% of what it has left.
                     eat = true;

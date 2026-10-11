@@ -7,6 +7,7 @@ pub mod chunk;
 pub mod generator;
 pub mod pathfind;
 pub mod physics;
+pub mod structures;
 
 use crate::config::Config;
 use crate::protocol::BlockPos;
@@ -383,6 +384,27 @@ impl World {
             }
         }
         Ok(n)
+    }
+
+    /// Spawners of a loaded chunk: (position, mob, delay). Unloaded chunks: none.
+    pub fn spawners_in(&self, cx: i32, cz: i32) -> Vec<(BlockPos, String, i32)> {
+        let Some(c) = self.chunks.get(&(cx, cz)) else { return vec![] };
+        c.block_entities
+            .iter()
+            .filter_map(|(p, be)| match be {
+                blockentity::BlockEntity::Spawner { mob, delay } => Some((*p, mob.clone(), *delay)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Counts a spawner down (not saved as a change: it is just a timer).
+    pub fn set_spawner_delay(&mut self, p: BlockPos, d: i32) {
+        if let Some(c) = self.chunks.get_mut(&(p.x >> 4, p.z >> 4)) {
+            if let Some(blockentity::BlockEntity::Spawner { delay, .. }) = c.block_entities.get_mut(&p) {
+                *delay = d;
+            }
+        }
     }
 
     pub fn block_entity(&mut self, p: BlockPos) -> Option<&mut blockentity::BlockEntity> {

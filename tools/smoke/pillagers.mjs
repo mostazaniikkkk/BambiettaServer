@@ -4,6 +4,7 @@
 import mineflayer from 'mineflayer'
 import { once } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
+import { Vec3 } from 'vec3'
 const host = process.argv[2] ?? '127.0.0.1'
 const port = Number(process.argv[3] ?? 25565)
 let failed = 0
@@ -30,7 +31,9 @@ b.chat(`/tp ${X} ${Y} ${Z}`); await sleep(800)
 b.chat('/summon pillager patrulla'); await sleep(1500)
 b.chat(`/tp ${X} ${Y + 40} ${Z}`); await sleep(500) // out of their sight while they patrol
 const pills = () => Object.values(b.entities).filter(e => e.name === 'pillager')
-check(pills().length === 5, `patrulla de 5 saqueadores (${pills().length})`)
+const vind = () => Object.values(b.entities).find(e => e.name === 'vindicator')
+check(pills().length === 4 && !!vind(), `patrulla de 4 saqueadores y un vindicador (${pills().length} + ${vind() ? 1 : 0})`)
+check(vind()?.equipment?.[0]?.name === 'iron_axe', `el vindicador lleva hacha de hierro (${vind()?.equipment?.[0]?.name})`)
 const captain = pills().find(e => banners.has(e.id))
 check(!!captain && banners.size === 1, `un capitán con el estandarte en la cabeza (${banners.size})`)
 const start = captain?.position.clone()
@@ -45,8 +48,10 @@ check(aggressive.size === 0, 'sin jugador a la vista no atacan')
 const c = captain.position
 b.chat(`/tp ${Math.floor(c.x) + 16} ${Y} ${Math.floor(c.z)}`); await sleep(500)
 b.chat('/gamemode survival')
-check(await until(() => pills().every(e => aggressive.has(e.id)), 8000), `toda la patrulla va por el jugador (${aggressive.size}/5)`)
+check(await until(() => [...pills(), vind()].every(e => e && aggressive.has(e.id)), 8000), `toda la patrulla va por el jugador (${aggressive.size}/5)`)
 check(await until(() => charging.size > 0, 6000), 'cargan las ballestas')
+// From here on the crossbows only: the vindicator (melee) would get in the way.
+b.chat('/killmobs vindicator 60')
 check(await until(() => b.health < 20, 12000), `las flechas hieren al jugador (vida ${b.health})`)
 // On easy (difficulty 1) they take turns: a patrol must not kill a player in a few seconds.
 {
@@ -91,6 +96,31 @@ check(await until(() => b.inventory.items().some(i => i.name === 'white_banner')
 check(await until(() => Object.values(b.entity.effects ?? {}).some(e => b.registry.effects[e.id]?.name === 'BadOmen' || b.registry.effects[e.id]?.name === 'bad_omen'), 3000), 'quien lo mata recibe Mal presagio')
 b.chat('/gamemode creative'); await sleep(300)
 b.chat('/killmobs pillager 100'); await sleep(300)
+// Breach team: with nobody in sight, the vindicator breaks a house's door and goes in to
+// search it, with a pillager escorting it.
+{
+  b.chat('/gamemode creative'); b.chat('/killmobs pillager 100'); b.chat('/killmobs vindicator 100'); await sleep(500)
+  const [HX, HZ] = [X + 70, Z]
+  b.chat(`/tp ${HX} ${Y + 3} ${HZ}`); await sleep(2500)
+  b.chat(`/fill ${HX - 20} ${Y - 1} ${HZ - 20} ${HX + 20} ${Y - 1} ${HZ + 20} stone`)
+  b.chat(`/fill ${HX - 20} ${Y} ${HZ - 20} ${HX + 20} ${Y + 6} ${HZ + 20} air`)
+  // A 5x5 room with an oak door facing west.
+  b.chat(`/fill ${HX - 3} ${Y} ${HZ - 3} ${HX + 3} ${Y + 3} ${HZ + 3} oak_planks`)
+  b.chat(`/fill ${HX - 2} ${Y} ${HZ - 2} ${HX + 2} ${Y + 2} ${HZ + 2} air`)
+  b.chat(`/setblock ${HX - 3} ${Y} ${HZ} oak_door[facing=west,half=lower]`)
+  b.chat(`/setblock ${HX - 3} ${Y + 1} ${HZ} oak_door[facing=west,half=upper]`)
+  await sleep(800)
+  b.chat(`/tp ${HX - 12} ${Y} ${HZ}`); await sleep(500)
+  b.chat('/summon pillager patrulla'); await sleep(1000)
+  b.chat(`/tp ${HX} ${Y + 30} ${HZ}`) // creative and far up: nobody to fight
+  const door = () => b.blockAt(new Vec3(HX - 3, Y, HZ))?.name
+  check(await until(() => door() === 'air', 60000), `el vindicador tumba la puerta (${door()})`)
+  const v = vind()
+  const inside = () => v && Math.abs(v.position.x - HX) < 2.6 && Math.abs(v.position.z - HZ) < 2.6
+  check(await until(inside, 15000), `entra a la casa a explorar (${v?.position})`)
+  const escorted = () => pills().some(e => !banners.has(e.id) && e.position.distanceTo(v.position) < 5)
+  check(await until(escorted, 10000), 'un saqueador lo escolta')
+}
 b.quit()
 console.log(failed ? `\n${failed} fallaron` : '\nTodo OK')
 process.exit(failed ? 1 : 0)

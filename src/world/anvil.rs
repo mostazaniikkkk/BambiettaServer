@@ -197,6 +197,8 @@ fn be_id(block: &str) -> &str {
         "sign"
     } else if block.ends_with("_banner") {
         "banner"
+    } else if block == "spawner" {
+        "mob_spawner"
     } else {
         block
     }
@@ -223,6 +225,15 @@ fn block_entity_to_nbt(pos: BlockPos, be: &BlockEntity, block: &str) -> Nbt {
             .with("Items", items(&b.items))
             .with("BrewTime", Nbt::Short(b.brew_time as i16))
             .with("Fuel", Nbt::Byte(b.fuel as i8)),
+        BlockEntity::Spawner { delay, .. } => {
+            let mut n = base.with("Delay", Nbt::Short(*delay as i16));
+            if let Some(Nbt::Compound(fields)) = be.client_nbt() {
+                for (k, v) in fields {
+                    n.set(&k, v);
+                }
+            }
+            n
+        }
         BlockEntity::Sign(_) | BlockEntity::Banner(_) => {
             let mut n = base;
             if let Some(Nbt::Compound(fields)) = be.client_nbt() {
@@ -261,6 +272,10 @@ fn block_entity_from_nbt(n: &Nbt) -> Option<(BlockPos, BlockEntity)> {
         }),
         "sign" | "hanging_sign" => BlockEntity::Sign(Sign::from_nbt(n)),
         "banner" => BlockEntity::Banner(banner_from_nbt(Some(n))),
+        "mob_spawner" => {
+            let mob = n.get("SpawnData").and_then(|d| d.get("entity")).and_then(|e| e.get_str("id")).unwrap_or("minecraft:pig").trim_start_matches("minecraft:").to_string();
+            BlockEntity::Spawner { mob, delay: n.get_i64("Delay").unwrap_or(20) as i32 }
+        }
         _ => return None,
     };
     Some((pos, be))

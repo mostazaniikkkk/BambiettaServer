@@ -8,13 +8,18 @@
 //! difficulty (one at a time on easy, two on normal, all of them on hard). Killing the captain
 //! drops the banner and gives Bad Omen, and the patrol falls apart: with no captain each one
 //! fights on its own, exactly like a skeleton (no roles, no shared target, no taking turns).
+//!
+//! Each patrol brings a vindicator with an escort (a pillager that sticks to it): while the
+//! patrol has nobody in sight, the vindicator looks for buildings with a wooden door nearby,
+//! breaks the door down and goes in to search them; in a fight it charges, breaking any door
+//! in its way, and its escort covers it.
 
 use super::mobs::{self, Action, Mob, MobKind, Seen};
 use super::projectiles::ProjectileKind;
 use super::{entities, Server};
 use crate::data;
 use crate::item::ItemStack;
-use crate::protocol::Nbt;
+use crate::protocol::{BlockPos, Nbt};
 use crate::world::{Dimension, World};
 use std::collections::HashMap;
 use std::f64::consts::PI;
@@ -32,14 +37,19 @@ pub struct Group {
     pub members: Vec<(i32, [f64; 3])>,
     /// Player someone in the patrol is fighting.
     pub target: Option<i32>,
+    /// The vindicator that breaks into buildings.
+    pub breacher: Option<(i32, [f64; 3])>,
 }
 
 /// The patrols of a dimension, from the state of their members.
 pub fn groups<'a>(mobs: impl Iterator<Item = &'a Mob>) -> HashMap<u32, Group> {
     let mut out: HashMap<u32, Group> = HashMap::new();
     for m in mobs.filter(|m| m.patrol != 0 && m.death_ticks.is_none()) {
-        let g = out.entry(m.patrol).or_insert(Group { captain: None, members: Vec::new(), target: None });
-        if m.captain {
+        let g = out.entry(m.patrol).or_insert(Group { captain: None, members: Vec::new(), target: None, breacher: None });
+        if m.kind == MobKind::Vindicator {
+            g.breacher = Some((m.eid, m.pos));
+            g.target = g.target.or(m.target);
+        } else if m.captain {
             g.captain = Some((m.eid, m.pos, m.yaw));
             g.target = m.target.or(g.target);
         } else {
@@ -66,6 +76,8 @@ enum Role {
     Captain,
     Guard(f64),
     Flanker(usize, usize),
+    /// Sticks to the vindicator.
+    Escort,
     Alone,
 }
 
@@ -78,11 +90,30 @@ fn role(m: &Mob, group: Option<&Group>) -> Role {
         return Role::Alone;
     }
     let i = g.members.iter().position(|x| x.0 == m.eid).unwrap_or(0);
+    // With a vindicator, the first pillager is its escort and the roles shift by one.
+    let (i, n) = if g.breacher.is_some() {
+        if i == 0 {
+            return Role::Escort;
+        }
+        (i - 1, g.members.len() - 1)
+    } else {
+        (i, g.members.len())
+    };
     match i {
         0 => Role::Guard(1.0),
         1 => Role::Guard(-1.0),
-        _ => Role::Flanker(i - 2, g.members.len() - 2),
+        _ => Role::Flanker(i - 2, n.saturating_sub(2)),
     }
+}
+
+/// Where the escort goes: next to the vindicator, between it and the player.
+fn escort_spot(group: Option<&Group>, toward: Option<[f64; 3]>) -> Option<[f64; 3]> {
+    let (_, v) = group?.breacher?;
+    let off = match toward {
+        Some(t) => flat([v[0] - t[0], 0.0, v[2] - t[2]]),
+        None => [0.0, 0.0, 0.0],
+    };
+    Some([v[0] + off[0] * 2.5, v[1], v[2] + off[2] * 2.5])
 }
 
 fn flat(v: [f64; 3]) -> [f64; 3] {
@@ -139,6 +170,7 @@ pub fn combat(server: &Server, world: &mut World, m: &mut Mob, t: &Seen, group: 
             let a = if j % 2 == 0 { base + k } else { base - k };
             if sees || d < RANGE + 2.0 { around(a, RANGE) } else { t.pos }
         }
+        Role::Escort => escort_spot(group, Some(t.pos)).unwrap_or(t.pos),
         Role::Alone => {
             // Like a skeleton: closes in until it sees the player, then circles around it
             // keeping its distance.
@@ -202,7 +234,7 @@ fn ally_in_the_way(m: &Mob, group: Option<&Group>, from: [f64; 3], to: [f64; 3])
     let Some(g) = group.filter(|g| g.captain.is_some()) else { return false };
     let d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
     let len2 = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).max(1e-6);
-    g.members.iter().map(|x| (x.0, x.1)).chain(g.captain.map(|c| (c.0, c.1))).filter(|x| x.0 != m.eid).any(|(_, p)| {
+    g.members.iter().map(|x| (x.0, x.1)).chain(g.captain.map(|c| (c.0, c.1))).chain(g.breacher).filter(|x| x.0 != m.eid).any(|(_, p)| {
         let c = [p[0], p[1] + 1.0, p[2]];
         let f = ((c[0] - from[0]) * d[0] + (c[1] - from[1]) * d[1] + (c[2] - from[2]) * d[2]) / len2;
         if !(0.0..1.0).contains(&f) {
@@ -234,7 +266,17 @@ pub fn patrol(world: &mut World, m: &mut Mob, group: Option<&Group>) -> Option<(
             }
             Some((mobs::follow_path(world, m, w), speed * 0.6))
         }
-        Role::Guard(_) | Role::Flanker(..) => {
+        Role::Escort if group.and_then(|g| g.breacher.zip(g.captain)).is_some_and(|((_, v), (_, c, _))| mobs::dist2(&v, &c) > 7.0 * 7.0) => {
+            // The vindicator is off searching a building: stay with it.
+            let spot = escort_spot(group, None)?;
+            if mobs::dist2(&spot, &m.pos) < 2.5 * 2.5 {
+                m.vel[0] = 0.0;
+                m.vel[2] = 0.0;
+                return Some((m.pos, 0.0));
+            }
+            Some((mobs::follow_path(world, m, spot), speed))
+        }
+        Role::Guard(_) | Role::Flanker(..) | Role::Escort => {
             let g = group?;
             let (_, c, yaw) = g.captain?;
             let i = g.members.iter().position(|x| x.0 == m.eid).unwrap_or(0);
@@ -258,6 +300,86 @@ pub fn patrol(world: &mut World, m: &mut Mob, group: Option<&Group>) -> Option<(
     }
 }
 
+/// The vindicator without a fight: searches buildings near the patrol (breaking their door),
+/// or else walks behind the captain.
+pub fn vindicator(world: &mut World, m: &mut Mob, group: Option<&Group>) -> Option<([f64; 3], f64)> {
+    let g = group?;
+    let (_, c, yaw) = g.captain?;
+    let speed = MobKind::Vindicator.walk_speed();
+    if let Some(door) = m.raid_door {
+        if m.explore == 0 {
+            // On the way to the door (the zombies' door code breaks it when it is in the way).
+            let state = world.get_block(door);
+            let still = crate::world::pathfind::wooden_door(&data::get().block_of_state(state).name) && data::get().block_of_state(state).get(state, "open") != Some("true");
+            if still && mobs::dist2(&m.pos, &[door.x as f64 + 0.5, m.pos[1], door.z as f64 + 0.5]) < 40.0 * 40.0 {
+                // Aim past the door, so the path goes through it (and the door gets broken).
+                let d = flat([door.x as f64 + 0.5 - m.pos[0], 0.0, door.z as f64 + 0.5 - m.pos[2]]);
+                let inside = [door.x as f64 + 0.5 + d[0] * 3.0, door.y as f64, door.z as f64 + 0.5 + d[2] * 3.0];
+                return Some((mobs::follow_path(world, m, inside), speed));
+            }
+            // Open now: in, a few blocks past it, and search for 15 s.
+            let d = flat([door.x as f64 + 0.5 - m.pos[0], 0.0, door.z as f64 + 0.5 - m.pos[2]]);
+            m.anchor = Some([door.x as f64 + 0.5 + d[0] * 3.0, door.y as f64, door.z as f64 + 0.5 + d[2] * 3.0]);
+            m.wander = m.anchor;
+            m.explore = 300;
+        }
+        m.explore = m.explore.saturating_sub(1);
+        if m.explore == 0 || mobs::dist2(&m.pos, &c) > 48.0 * 48.0 {
+            m.raid_door = None;
+            m.explore = 0;
+            m.anchor = None;
+            return None;
+        }
+        let a = m.anchor.unwrap_or(m.pos);
+        if m.wander.is_none_or(|w| (w[0] - m.pos[0]).powi(2) + (w[2] - m.pos[2]).powi(2) < 1.0) {
+            let ang = entities::random() as f64 * PI * 2.0;
+            let r = entities::random() as f64 * 3.0;
+            m.wander = Some([a[0] + ang.cos() * r, a[1], a[2] + ang.sin() * r]);
+        }
+        let w = m.wander.unwrap_or(a);
+        return Some((mobs::follow_path(world, m, w), speed * 0.7));
+    }
+    // Every few seconds, a look for doors around.
+    if (m.age as i32 + m.eid) % 60 == 0 {
+        m.raid_door = find_door(world, m.pos, 20);
+        if m.raid_door.is_some() {
+            return None;
+        }
+    }
+    // In formation, right behind the captain.
+    let (s, co) = (yaw as f64).to_radians().sin_cos();
+    let slot = [c[0] + s * 2.0, c[1], c[2] - co * 2.0];
+    if mobs::dist2(&slot, &m.pos) < 1.0 {
+        m.vel[0] = 0.0;
+        m.vel[2] = 0.0;
+        return Some((m.pos, 0.0));
+    }
+    Some((mobs::follow_path(world, m, slot), speed * 0.8))
+}
+
+/// The nearest closed wooden door (its lower half) within `r` blocks.
+fn find_door(world: &mut World, p: [f64; 3], r: i32) -> Option<BlockPos> {
+    let reg = data::get();
+    let (cx, cy, cz) = (p[0].floor() as i32, p[1].floor() as i32, p[2].floor() as i32);
+    let mut best: Option<(i32, BlockPos)> = None;
+    for dx in -r..=r {
+        for dz in -r..=r {
+            for dy in -3..=3 {
+                let q = BlockPos::new(cx + dx, cy + dy, cz + dz);
+                let s = world.get_block(q);
+                let b = reg.block_of_state(s);
+                if crate::world::pathfind::wooden_door(&b.name) && b.get(s, "half") == Some("lower") && b.get(s, "open") != Some("true") {
+                    let d = dx * dx + dz * dz + dy * dy;
+                    if best.is_none_or(|x| d < x.0) {
+                        best = Some((d, q));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
 /// The ominous banner (the captain wears it on its head and drops it).
 pub fn ominous_banner() -> Option<ItemStack> {
     let pattern = |p: &str, c: i32| Nbt::Compound(vec![("Pattern".into(), Nbt::String(p.into())), ("Color".into(), Nbt::Int(c))]);
@@ -277,7 +399,8 @@ pub fn spawn_patrol(server: &Server, dim: Dimension, pos: [f64; 3], escort: usiz
     let mut eids = Vec::new();
     for i in 0..=escort {
         let off = if i == 0 { [0.0, 0.0] } else { [((i % 3) as f64 - 1.0) * 1.2, -1.5 * (i.div_ceil(3)) as f64] };
-        let eid = mobs::spawn(server, dim, MobKind::Pillager, [pos[0] + off[0], pos[1], pos[2] + off[1]]);
+        let kind = if i == 1 && escort >= 2 { MobKind::Vindicator } else { MobKind::Pillager };
+        let eid = mobs::spawn(server, dim, kind, [pos[0] + off[0], pos[1], pos[2] + off[1]]);
         if i == 0 {
             make_captain(server, eid, id);
         } else if let Some(m) = server.mobs.lock().unwrap().get_mut(&eid) {
@@ -295,6 +418,34 @@ pub fn make_captain(server: &Server, eid: i32, id: u32) {
         m.captain = true;
     }
     server.broadcast_tracked(eid, &mobs::equipment_stack(eid, 5, ominous_banner()), true);
+}
+
+/// Pillager outposts are guarded: while a player is near one, pillagers keep turning up around
+/// the tower (up to 4).
+pub fn outpost_garrison(server: &Server, seen: &[Seen]) {
+    if !server.config.spawn_monsters || server.config.difficulty == 0 {
+        return;
+    }
+    for s in seen.iter().filter(|s| s.dim == Dimension::Overworld && s.present) {
+        let (px, pz) = (s.pos[0].floor() as i32, s.pos[2].floor() as i32);
+        let spot = {
+            let mut world = server.world(Dimension::Overworld).lock().unwrap();
+            let Some((ox, _, oz)) = world.generator().locate("outpost", px, pz) else { continue };
+            if ((ox - px) as f64).hypot((oz - pz) as f64) > 80.0 {
+                continue;
+            }
+            let guards = server.mobs.lock().unwrap().values().filter(|m| m.kind == MobKind::Pillager && m.patrol == 0 && mobs::dist2(&m.pos, &[ox as f64, m.pos[1], oz as f64]) < 48.0 * 48.0).count();
+            if guards >= 4 {
+                continue;
+            }
+            let a = entities::random() as f64 * PI * 2.0;
+            let r = 7.0 + entities::random() as f64 * 12.0;
+            mobs::open_sky_spot(&mut world, ox + (a.cos() * r) as i32, oz + (a.sin() * r) as i32, s.pos[1] as i32)
+        };
+        if let Some(at) = spot {
+            mobs::spawn(server, Dimension::Overworld, MobKind::Pillager, at);
+        }
+    }
 }
 
 /// Now and then a patrol shows up near a player in the Overworld (one at a time per area).

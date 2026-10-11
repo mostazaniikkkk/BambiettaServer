@@ -77,8 +77,15 @@ check(await until(() => wolf.position.distanceTo(b.entity.position) < 4, 8000), 
 await tp(X + 18, Z - 6); b.chat('/summon pig'); await sleep(300)
 await tp(X + 18, Z - 3)
 const pig = near('pig')[0]
-await b.lookAt(pig.position.offset(0, 0.5, 0), true)
-b.attack(pig); await sleep(200)
+// Hits the pig (repositioning next to it) until the hit lands.
+let pigHurt = false
+b._client.on('damage_event', p => { if (p.entityId === pig.id) pigHurt = true })
+for (let i = 0; i < 5 && !pigHurt; i++) {
+  b.chat(`/tp ${pig.position.x.toFixed(1)} ${Y} ${(pig.position.z - 2).toFixed(1)}`); await sleep(300)
+  await b.lookAt(pig.position.offset(0, 0.5, 0), true)
+  b.attack(pig); await sleep(400)
+}
+check(pigHurt, 'el dueño golpea al cerdo')
 check(await until(() => !b.entities[pig.id] || pig.metadata?.[9] === 0, 15000), 'el lobo ataca lo que golpea su dueño')
 b.quit()
 console.log(failed ? `\n${failed} fallaron` : '\nTodo OK')

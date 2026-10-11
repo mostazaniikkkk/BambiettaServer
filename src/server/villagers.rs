@@ -243,7 +243,7 @@ fn enchanted_book_offer(t: &Trade) -> Option<Offer> {
     }
     let mut book = stack("enchanted_book", 1)?;
     book.enchant(&e.name, level);
-    Some(Offer { cost_a: stack("emerald", price.min(64) as i8)?, cost_b: stack("book", 1), result: book, uses: 0, max_uses: t.7, xp: t.8, price_mult: t.9, demand: 0 })
+    Some(Offer { cost_a: stack("emerald", price.min(64) as i8)?, cost_b: stack("book", 1), result: book, uses: 0, max_uses: t.7, xp: t.8, price_mult: t.9, demand: 0, special: 0 })
 }
 
 fn make_offer(t: &Trade) -> Option<Offer> {
@@ -259,6 +259,7 @@ fn make_offer(t: &Trade) -> Option<Offer> {
         xp: t.8,
         price_mult: t.9,
         demand: 0,
+        special: 0,
     })
 }
 
@@ -333,7 +334,7 @@ impl VillagerData {
                     let bytes: Option<Vec<u8>> = (0..h.len()).step_by(2).map(|i| u8::from_str_radix(h.get(i..i + 2)?, 16).ok()).collect();
                     crate::protocol::Nbt::from_network(&bytes?).map(Box::new)
                 });
-                Some(Offer { cost_a: stack(&o.a.0, o.a.1)?, cost_b: o.b.and_then(|b| stack(&b.0, b.1)), result, uses: o.uses, max_uses: o.max_uses, xp: o.xp, price_mult: o.mult, demand: 0 })
+                Some(Offer { cost_a: stack(&o.a.0, o.a.1)?, cost_b: o.b.and_then(|b| stack(&b.0, b.1)), result, uses: o.uses, max_uses: o.max_uses, xp: o.xp, price_mult: o.mult, demand: 0, special: 0 })
             })
             .collect();
         Self { profession: s.profession, level: s.level.clamp(1, 5), xp: s.xp, vtype: s.vtype, offers, restock_at: 0 }
@@ -362,14 +363,31 @@ struct SavedOffer {
     mult: f32,
 }
 
-fn trade_list(window: u8, v: &VillagerData) -> Vec<u8> {
+/// The offers as this player sees them: Hero of the Village takes
+/// (0.3 + 0.0625 x level) of the first price off (at least one), like vanilla.
+fn for_player(player: &Player, offers: &[Offer]) -> Vec<Offer> {
+    let hero = super::effects::level(&player.state.lock().unwrap(), "hero_of_the_village");
+    offers
+        .iter()
+        .map(|o| {
+            let mut o = o.clone();
+            if let Some(amp) = hero {
+                let off = ((0.3 + 0.0625 * amp as f32) * o.cost_a.count as f32).floor() as i32;
+                o.special = -off.max(1);
+            }
+            o
+        })
+        .collect()
+}
+
+fn trade_list(window: u8, offers: &[Offer], v: &VillagerData) -> Vec<u8> {
     let mut p = packet(id::play::TRADE_LIST);
-    p.varint(window as i32).varint(v.offers.len() as i32);
-    for o in &v.offers {
+    p.varint(window as i32).varint(offers.len() as i32);
+    for o in offers {
         crate::item::write_slot(&mut p, &Some(o.cost_a.clone()));
         crate::item::write_slot(&mut p, &Some(o.result.clone()));
         crate::item::write_slot(&mut p, &o.cost_b);
-        p.bool(o.out_of_stock()).i32(o.uses).i32(o.max_uses).i32(o.xp).i32(0).f32(o.price_mult).i32(o.demand);
+        p.bool(o.out_of_stock()).i32(o.uses).i32(o.max_uses).i32(o.xp).i32(o.special).f32(o.price_mult).i32(o.demand);
     }
     p.varint(v.level).varint(v.xp).bool(true).bool(true);
     p
@@ -395,17 +413,18 @@ pub fn open_trades(server: &Arc<Server>, player: &Arc<Player>, eid: i32) {
     };
     let (v, pos) = data;
     let title = format!("{} - {}", profession_title(&v.profession), ["Novato", "Aprendiz", "Oficial", "Experto", "Maestro"][(v.level - 1).clamp(0, 4) as usize]);
+    let offers = for_player(player, &v.offers);
     let mut st = player.state.lock().unwrap();
     let packets = st.inv.open(WindowKind::Merchant, crate::protocol::BlockPos::new(pos[0].floor() as i32, pos[1].floor() as i32, pos[2].floor() as i32), vec![None; 3], &title);
     let wid = st.inv.window_id();
     if let Some(w) = st.inv.window.as_mut() {
-        w.station.offers = v.offers.clone();
+        w.station.offers = offers.clone();
         w.station.merchant = eid;
     }
     for p in packets {
         player.send(p);
     }
-    player.send(trade_list(wid, &v));
+    player.send(trade_list(wid, &offers, &v));
     let _ = text;
 }
 
@@ -490,12 +509,13 @@ pub fn traded(server: &Arc<Server>, player: &Arc<Player>, index: usize, _xp: i32
     } else {
         super::sound::entity(server, eid, "entity.villager.yes", super::sound::NEUTRAL, 1.0, 1.0);
     }
+    let offers = for_player(player, &data.offers);
     let mut st = player.state.lock().unwrap();
     let wid = st.inv.window_id();
     if let Some(w) = st.inv.window.as_mut() {
-        w.station.offers = data.offers.clone();
+        w.station.offers = offers.clone();
     }
-    player.send(trade_list(wid, &data));
+    player.send(trade_list(wid, &offers, &data));
 }
 
 /// Restock: a few minutes after trading, sold-out offers come back.

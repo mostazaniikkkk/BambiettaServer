@@ -5,6 +5,9 @@
 //! Defeating every wave gives the defenders Hero of the Village; if the villagers all die,
 //! the raid is lost and the raiders celebrate.
 //!
+//! Raids in progress are saved in `raids.json` (their raiders, with the mobs) and go on
+//! after a restart.
+//!
 //! Also the illagers that only come with raids: evokers (fang attacks, summoning vexes,
 //! keeping their distance), vexes (fly through walls, live a short while) and ravagers
 //! (heavy hitters that trample leaves and crops in their way).
@@ -184,8 +187,8 @@ fn advance(server: &Arc<Server>, seen: &[Seen], age: i64) {
         let mut raids = RAIDS.lock().unwrap();
         let mobs_map = server.mobs.lock().unwrap();
         for r in raids.iter_mut() {
-            // Raiders still alive, and villagers left.
-            r.raiders.retain(|e| mobs_map.get(e).is_some_and(|m| m.death_ticks.is_none()));
+            // Raiders still alive (also those loaded after a restart), and villagers left.
+            r.raiders = mobs_map.values().filter(|m| m.raid == r.id && m.death_ticks.is_none()).map(|m| m.eid).collect();
             let villagers = mobs_map.values().any(|m| m.kind == MobKind::Villager && m.death_ticks.is_none() && dist_flat(&m.pos, &r.center) < RANGE);
             let left: f32 = r.raiders.iter().filter_map(|e| mobs_map.get(e)).map(|m| m.health.max(0.0)).sum();
             let progress = match r.phase {
@@ -283,6 +286,96 @@ fn advance(server: &Arc<Server>, seen: &[Seen], age: i64) {
             }
         }
     }
+}
+
+// ---------- saving ----------
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedRaid {
+    id: u32,
+    center: [f64; 3],
+    level: i32,
+    wave: i32,
+    waves: i32,
+    wave_health: f32,
+    /// Ticks until the next wave (none: fighting one).
+    next_wave: Option<i64>,
+    /// Ticks the raid has lasted.
+    elapsed: i64,
+    heroes: Vec<String>,
+}
+
+fn file(server: &Server) -> std::path::PathBuf {
+    server.world(Dimension::Overworld).lock().unwrap().dir().join("raids.json")
+}
+
+/// Saves the raids in progress.
+pub fn save(server: &Server) {
+    let age = server.age.load(std::sync::atomic::Ordering::Relaxed);
+    let saved: Vec<SavedRaid> = RAIDS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|r| {
+            let next_wave = match r.phase {
+                Phase::Waiting(at) => Some((at - age).max(0)),
+                Phase::Fighting => None,
+                Phase::Over(..) => return None,
+            };
+            Some(SavedRaid {
+                id: r.id,
+                center: r.center,
+                level: r.level,
+                wave: r.wave,
+                waves: r.waves,
+                wave_health: r.wave_health,
+                next_wave,
+                elapsed: age - r.started,
+                heroes: r.heroes.iter().map(|u| format!("{u:032x}")).collect(),
+            })
+        })
+        .collect();
+    let path = file(server);
+    if saved.is_empty() {
+        let _ = std::fs::remove_file(path);
+    } else if let Err(e) = std::fs::write(&path, serde_json::to_string(&saved).unwrap_or_default()) {
+        tracing::warn!("no se pudieron guardar las incursiones: {e}");
+    }
+}
+
+/// Loads the raids that were going on (after the mobs: their raiders head back to the village).
+pub fn load(server: &Server) {
+    let Ok(text) = std::fs::read_to_string(file(server)) else { return };
+    let Ok(saved) = serde_json::from_str::<Vec<SavedRaid>>(&text) else {
+        tracing::warn!("raids.json inválido; se ignora");
+        return;
+    };
+    let age = server.age.load(std::sync::atomic::Ordering::Relaxed);
+    let mut map = server.mobs.lock().unwrap();
+    let mut raids = RAIDS.lock().unwrap();
+    for s in saved {
+        for m in map.values_mut().filter(|m| m.raid == s.id) {
+            m.anchor = Some(s.center);
+        }
+        raids.push(Raid {
+            id: s.id,
+            center: s.center,
+            level: s.level,
+            wave: s.wave,
+            waves: s.waves,
+            raiders: vec![],
+            wave_health: s.wave_health,
+            phase: match s.next_wave {
+                Some(t) => Phase::Waiting(age + t),
+                None => Phase::Fighting,
+            },
+            started: age - s.elapsed,
+            bar: 0x5241_4944_0000_0000_0000_0000_0000_0000 | s.id as u128,
+            viewers: vec![],
+            heroes: s.heroes.iter().filter_map(|h| u128::from_str_radix(h, 16).ok()).collect(),
+        });
+    }
+    tracing::info!("{} incursiones en curso", raids.len());
 }
 
 /// Raider flag: cheering after a won raid.

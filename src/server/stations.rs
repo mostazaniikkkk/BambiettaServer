@@ -88,6 +88,8 @@ pub struct Offer {
     pub xp: i32,
     pub price_mult: f32,
     pub demand: i32,
+    /// Discount for this player (Hero of the Village), negative.
+    pub special: i32,
 }
 
 impl Offer {
@@ -99,7 +101,7 @@ impl Offer {
     pub fn price_a(&self) -> i8 {
         let base = self.cost_a.count as i32;
         let extra = ((base * self.demand) as f32 * self.price_mult).floor() as i32;
-        (base + extra.max(0)).clamp(1, self.cost_a.max_stack() as i32) as i8
+        (base + extra.max(0) + self.special).clamp(1, self.cost_a.max_stack() as i32) as i8
     }
 }
 

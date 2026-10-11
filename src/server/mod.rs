@@ -395,6 +395,7 @@ impl Server {
             playerdata::save(self, &p);
         }
         mobs::save(self);
+        raids::save(self);
         vehicles::save(self);
         maps::save();
         // Player views before locking the world (lock order: player -> world).

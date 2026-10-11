@@ -66,6 +66,16 @@ await step('incursión', async () => {
   check(waves >= 3, `llegan las oleadas de la dificultad (${waves})`)
   check(await until(() => (raidBar() ?? '').includes('victory'), 10000), 'al vencerlas: victoria')
   check(await until(() => effects.has('heroofthevillage'), 5000), 'y el defensor es Héroe de la aldea')
+  // A hero gets a discount from the villagers.
+  let offers = null
+  a._client.once('trade_list', p => { offers = p.trades })
+  const v = mobs('villager').sort((p, q) => p.position.distanceTo(a.entity.position) - q.position.distanceTo(a.entity.position))[0]
+  if (v) {
+    a.chat(`/tp ${v.position.x.toFixed(1)} ${v.position.y.toFixed(1)} ${(v.position.z + 1.5).toFixed(1)}`); await sleep(500)
+    await a.lookAt(v.position.offset(0, 1.5, 0), true); await a.activateEntity(v)
+  }
+  check(await until(() => offers != null, 3000) && offers.every(o => o.specialPrice < 0), `los aldeanos le hacen descuento (${offers?.map(o => o.specialPrice).join(', ')})`)
+  if (a.currentWindow) a.closeWindow(a.currentWindow)
 })
 
 await step('invocador', async () => {

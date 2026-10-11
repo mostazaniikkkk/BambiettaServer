@@ -34,6 +34,7 @@ async fn main() -> Result<()> {
     let ip: std::net::IpAddr = config.host.parse()?;
     let srv = server::Server::new(config.clone())?;
     server::mobs::load(&srv);
+    server::raids::load(&srv);
     server::vehicles::load(&srv);
     server::maps::load(&std::path::PathBuf::from(&config.world_folder));
 

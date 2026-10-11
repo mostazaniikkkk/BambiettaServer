@@ -1269,6 +1269,9 @@ struct SavedMob {
     horse: Option<SavedHorse>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     home: Option<[i32; 3]>,
+    /// Raid it belongs to.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    raid: u32,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1335,6 +1338,7 @@ pub fn save(server: &Server) {
                 jump: m.jump_attr,
             }),
             home: m.home.map(|h| [h.x, h.y, h.z]),
+            raid: m.raid,
         })
         .collect();
     let path = mobs_file(server);
@@ -1373,6 +1377,7 @@ pub fn load(server: &Server) {
                 m.variant = s.variant;
             }
             m.built = s.built;
+            m.raid = s.raid;
             m.home = s.home.map(|h| BlockPos::new(h[0], h[1], h[2]));
             if let Some(h) = s.horse {
                 m.saddle = h.saddle;

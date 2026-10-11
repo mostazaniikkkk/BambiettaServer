@@ -344,6 +344,13 @@ pub struct Mob {
     pub owner: Option<u128>,
     pub sitting: bool,
     pub prey: Option<i32>,
+    /// Perception: ticks since it last saw its target, and where that was.
+    pub unseen: u32,
+    pub seen_at: Option<[f64; 3]>,
+    /// Heading for where it last saw its target (at chasing speed, not strolling).
+    pub searching: bool,
+    /// Land mob in the water: the bank it is swimming to.
+    pub shore: Option<BlockPos>,
 }
 
 impl Mob {
@@ -581,6 +588,10 @@ pub fn spawn(server: &Server, dim: Dimension, kind: MobKind, pos: [f64; 3]) -> i
         owner: None,
         sitting: false,
         prey: None,
+        unseen: 0,
+        seen_at: None,
+        searching: false,
+        shore: None,
     };
     match kind {
         MobKind::MagmaCube => {
@@ -756,6 +767,8 @@ pub enum Action {
     Breed(Dimension, MobKind, [f64; 3], (i32, i32), Option<i32>, Option<u128>),
     /// A mob bites another mob: (target, damage, attacker).
     HurtMob(i32, f32, i32),
+    /// A packet for everyone in a dimension (door cracks, level events...).
+    DimPacket(Dimension, Vec<u8>),
 }
 
 pub fn difficulty_damage(server: &Server, base: f32) -> f32 {
@@ -833,6 +846,9 @@ pub fn tick(server: &Arc<Server>, age: i64) {
     }
     if age % 1200 == 600 {
         super::pillagers::natural_patrols(server, &seen);
+    }
+    if age % 20 == 0 {
+        super::doors::decay(server, age);
     }
     super::dragon::tick_fight(server, &seen, age);
 
@@ -950,6 +966,7 @@ pub fn run_actions(server: &Arc<Server>, actions: Vec<Action>) {
             }
             Action::Breed(dim, kind, at, parents, by, owner) => super::animals::breed(server, dim, kind, at, parents, by, owner),
             Action::HurtMob(target, amount, by) => hurt(server, target, amount, "mob_attack", Some(by), None, 0),
+            Action::DimPacket(dim, p) => server.broadcast_dim(dim, &p, None),
             Action::Explode(dim, pos, power, by, fire) => explosion::explode_ex(server, dim, pos, power, Some(by), fire),
             Action::Shoot(dim, kind, shooter, from, vel) => {
                 let crossbow = kind == ProjectileKind::Arrow && kind_of(server, shooter) == Some(MobKind::Pillager);
@@ -1115,18 +1132,57 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
 
     let mut goal: Option<([f64; 3], f64)> = None;
     let target: Option<&Seen> = if kind.aggressive() {
-        // Zombies notice players from further away (vanilla: 35 blocks).
+        // Perception like vanilla: a player is noticed only if the mob sees it (line of sight)
+        // within its range; once noticed it is followed further, and remembered for a while
+        // after losing sight of it (then the mob goes to look where it last saw it).
         let range = match kind {
             MobKind::Ghast => 64.0,
             MobKind::Blaze => 48.0,
             MobKind::Zombie => 32.0,
             _ => 16.0,
         };
-        let t = seen
-            .iter()
-            .filter(|s| s.targetable && dist2(&s.pos, &m.pos) < range * range && !(kind == MobKind::Piglin && s.gold_armor))
-            .filter(|s| m.target.is_none() || m.target == Some(s.player.eid) || dist2(&s.pos, &m.pos) < 8.0 * 8.0)
-            .min_by(|a, b| dist2(&a.pos, &m.pos).total_cmp(&dist2(&b.pos, &m.pos)));
+        let follow = f64::max(range * 1.25, 32.0);
+        let eye = [m.pos[0], m.pos[1] + m.size().1 * 0.85, m.pos[2]];
+        // Spiders only hunt in the dark (unless provoked).
+        let calm = kind == MobKind::Spider && m.angry == 0 && lit(world, m.pos, day);
+        let current = m.target.and_then(|e| seen.iter().find(|s| s.player.eid == e && s.targetable && dist2(&s.pos, &m.pos) < follow * follow));
+        let current = match current {
+            Some(s) if !(calm && entities::random() < 0.01) => {
+                // Checked every few ticks: still in sight?
+                if m.age % 5 == 0 {
+                    if line_of_sight(world, eye, s.eye) {
+                        m.unseen = 0;
+                        m.seen_at = Some(s.pos);
+                    } else {
+                        m.unseen += 5;
+                    }
+                }
+                if m.unseen > 120 && m.angry == 0 {
+                    // Lost: go and look where it was last seen.
+                    m.wander = m.seen_at.take();
+                    m.searching = m.wander.is_some();
+                    m.unseen = 0;
+                    None
+                } else {
+                    Some(s)
+                }
+            }
+            _ => None,
+        };
+        // Looking for someone new (staggered, it costs a few rays).
+        let t = current.or_else(|| {
+            if calm || (m.age as i32 + m.eid) % 10 != 0 {
+                return None;
+            }
+            seen.iter()
+                .filter(|s| s.targetable && dist2(&s.pos, &m.pos) < range * range && !(kind == MobKind::Piglin && s.gold_armor))
+                .filter(|s| line_of_sight(world, eye, s.eye))
+                .min_by(|a, b| dist2(&a.pos, &m.pos).total_cmp(&dist2(&b.pos, &m.pos)))
+        });
+        if t.is_some() && m.target.is_none() {
+            m.unseen = 0;
+            m.seen_at = t.map(|s| s.pos);
+        }
         // A provoked piglin chases even while holding gold.
         let provoked = m.target.and_then(|t| seen.iter().find(|s| s.player.eid == t && s.targetable && dist2(&s.pos, &m.pos) < 32.0 * 32.0));
         t.or(if m.angry > 0 { provoked } else { None })
@@ -1323,9 +1379,6 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         if g == t.pos && !kind.flies() {
             goal = Some((follow_path(world, m, t.pos), speed));
         }
-    } else if kind != MobKind::Pillager {
-        m.path.clear();
-        m.path_goal = None;
     }
 
     // Undead that burn: shortly before sunrise and during the day they go for the shade (under
@@ -1352,7 +1405,8 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
                 let len = (dx * dx + dz * dz).sqrt().max(1e-6);
                 sky_exposed(world, [m.pos[0] + dx / len * 0.8, g[1].max(m.pos[1]), m.pos[2] + dz / len * 0.8])
             });
-            if into_sun || goal.is_none() {
+            // Without a goal yet it may still roam (only to shaded spots, see below).
+            if into_sun {
                 m.vel[0] = 0.0;
                 m.vel[2] = 0.0;
                 return;
@@ -1416,25 +1470,72 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         }
     }
 
-    // Animals, villagers and monsters without a target: wander or flee.
+    // A land mob in the water swims to the nearest bank.
+    if goal.is_none() && !kind.flies() && !matches!(kind, MobKind::Strider | MobKind::Ghast) && in_water(world, m.pos) {
+        if m.shore.is_none() || m.age % 40 == 0 {
+            m.shore = find_shore(world, m);
+        }
+        if let Some(c) = m.shore {
+            goal = Some((follow_path(world, m, [c.x as f64 + 0.5, c.y as f64, c.z as f64 + 0.5]), kind.speed()));
+        }
+    } else {
+        m.shore = None;
+    }
+
+    // Animals, villagers and monsters without a target: wander or flee. Monsters patrol (they
+    // roam further and more often, along a path) until they find someone.
     if goal.is_none() {
-        let speed = if m.panic > 0 { kind.speed() * 2.0 } else { kind.speed() };
+        let patrols = kind.hostile() && !kind.flies() && kind != MobKind::MagmaCube;
+        let speed = if m.panic > 0 { kind.speed() * 2.0 } else if patrols { kind.speed() * 0.8 } else { kind.speed() };
         let reached = m.wander.is_some_and(|w| (w[0] - m.pos[0]).powi(2) + (w[2] - m.pos[2]).powi(2) < 1.0);
-        if reached || (m.panic > 0 && m.panic % 30 == 0) {
+        if reached || (m.panic > 0 && m.panic % 30 == 0) || (m.wander.is_some() && m.age % 400 == 0 && !m.searching) {
             m.wander = None;
         }
-        if m.wander.is_none() && (m.panic > 0 || entities::random() < 1.0 / 120.0) {
-            let a = entities::random() as f64 * std::f64::consts::TAU;
-            let r = 3.0 + entities::random() as f64 * 7.0;
-            m.wander = Some([m.pos[0] + a.cos() * r, m.pos[1], m.pos[2] + a.sin() * r]);
+        if m.wander.is_none() {
+            m.searching = false;
+        }
+        let speed = if m.searching { kind.speed() * 1.25 } else { speed };
+        let chance = if patrols { 1.0 / 40.0 } else { 1.0 / 120.0 };
+        if m.wander.is_none() && (m.panic > 0 || entities::random() < chance) {
+            // A few tries for a spot on dry land (land mobs keep out of the water).
+            for _ in 0..4 {
+                let a = entities::random() as f64 * std::f64::consts::TAU;
+                let r = if patrols { 6.0 + entities::random() as f64 * 10.0 } else { 3.0 + entities::random() as f64 * 7.0 };
+                let (x, z) = ((m.pos[0] + a.cos() * r).floor() as i32, (m.pos[2] + a.sin() * r).floor() as i32);
+                // A spot it can stand on, near its own height (not inside a wall, not in a hole).
+                let (mw, mh) = m.size();
+                let base = cell(m.pos).y;
+                let Some(y) = [0, 1, -1, 2, -2, 3, -3].into_iter().map(|dy| base + dy).find(|&y| crate::world::pathfind::standable(world, BlockPos::new(x, y, z), mw, mh)) else { continue };
+                let w = [x as f64 + 0.5, y as f64, z as f64 + 0.5];
+                let ground = data::get().block_of_state(world.get_block(BlockPos::new(x, y, z))).name.as_str();
+                // Undead roaming by day stay in the shade.
+                let sunny = matches!(kind, MobKind::Zombie | MobKind::Skeleton) && m.dim == Dimension::Overworld && sun_soon(server) && sky_exposed(world, w);
+                if !sunny && !matches!(ground, "water" | "lava") {
+                    m.wander = Some(w);
+                    break;
+                }
+            }
         }
         if let Some(w) = m.wander {
-            face(m, w);
-            goal = Some((w, speed));
+            if patrols {
+                goal = Some((follow_path(world, m, w), speed));
+            } else {
+                face(m, w);
+                goal = Some((w, speed));
+            }
         }
         if kind == MobKind::Blaze {
             // Without a target it descends slowly.
             m.vel[1] -= 0.005;
+        }
+    }
+
+    // A zombie with a closed wooden door in its way breaks it.
+    if kind == MobKind::Zombie && goal.is_some() {
+        if let Some(door) = super::doors::in_the_way(world, m) {
+            let age = server.age.load(Ordering::Relaxed);
+            super::doors::hit(server, world, m, door, age, actions);
+            return;
         }
     }
 
@@ -1481,6 +1582,63 @@ pub(super) fn line_of_sight(world: &mut World, from: [f64; 3], to: [f64; 3]) -> 
         }
     }
     true
+}
+
+/// Light enough to keep spiders calm: daylight under open sky, or a light source nearby.
+fn lit(world: &mut World, p: [f64; 3], day: bool) -> bool {
+    if day && sky_exposed(world, p) {
+        return true;
+    }
+    let reg = data::get();
+    let c = cell(p);
+    for dx in -6..=6i32 {
+        for dy in -3..=4i32 {
+            for dz in -6..=6i32 {
+                let d = dx.abs() + dy.abs() + dz.abs();
+                if d > 7 {
+                    continue;
+                }
+                if reg.light(world.get_block(BlockPos::new(c.x + dx, c.y + dy, c.z + dz))).1 as i32 - d >= 8 {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// The closest dry spot a land mob can climb onto, within 12 blocks.
+fn find_shore(world: &mut World, m: &Mob) -> Option<BlockPos> {
+    let (w, h) = m.size();
+    let base = cell(m.pos);
+    for r in 1..=12i32 {
+        let mut best: Option<(i32, BlockPos)> = None;
+        for dx in -r..=r {
+            for dz in -r..=r {
+                if dx.abs() != r && dz.abs() != r {
+                    continue;
+                }
+                for dy in [1, 0, 2, -1] {
+                    let c = BlockPos::new(base.x + dx, base.y + dy, base.z + dz);
+                    let here = data::get().block_of_state(world.get_block(c)).name.as_str();
+                    if here != "water" && crate::world::pathfind::standable(world, c, w, h) {
+                        let below = data::get().block_of_state(world.get_block(BlockPos::new(c.x, c.y - 1, c.z))).name.as_str();
+                        if below != "water" {
+                            let d = dx * dx + dz * dz;
+                            if best.is_none_or(|b| d < b.0) {
+                                best = Some((d, c));
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(b) = best {
+            return Some(b.1);
+        }
+    }
+    None
 }
 
 /// Day, or less than a minute before sunrise.
@@ -1571,7 +1729,8 @@ pub(super) fn follow_path(world: &mut World, m: &mut Mob, target: [f64; 3]) -> [
     let moved = m.path_goal.is_none_or(|g| (g.x - goal.x).abs() + (g.y - goal.y).abs() + (g.z - goal.z).abs() > 2);
     if m.path_wait == 0 && (m.path.is_empty() || lost || moved) && PATH_BUDGET.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |b| b.checked_sub(1)).is_ok() {
         let (w, h) = m.size();
-        m.path = crate::world::pathfind::find(world, cell(m.pos), goal, w, h, 800).unwrap_or_default().into();
+        // Zombies plan through wooden doors (they break them).
+        m.path = crate::world::pathfind::find(world, cell(m.pos), goal, w, h, 800, m.kind == MobKind::Zombie).unwrap_or_default().into();
         m.path_goal = Some(goal);
         m.path_best = f64::MAX;
         // Unreachable target: do not search again on every tick.
@@ -1674,8 +1833,11 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
     }
     // Step up one block; spiders climb walls. Anything taller (a wall, a fence) cannot be
     // jumped: without this check the mob would hop against it forever, so it goes around it.
+    // In the water, bumping into the bank pushes it up and out (like vanilla).
     if blocked && !m.kind.flies() {
-        if m.kind == MobKind::Spider {
+        if wet {
+            m.vel[1] = 0.3;
+        } else if m.kind == MobKind::Spider {
             m.vel[1] = 0.2;
         } else if m.on_ground {
             if can_jump_over(world, m, want) {
@@ -1683,7 +1845,10 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
                 // peak of ~1.25 blocks (with 0.42 it stayed at 0.85 and never cleared a block).
                 m.vel[1] = 0.5;
             } else if m.detour.is_none() {
-                m.wander = None;
+                // A stroll gives up on its destination; a search for the player does not.
+                if !m.searching {
+                    m.wander = None;
+                }
                 m.detour = Some((along_wall(want, d), 20 + (entities::random() * 20.0) as u32));
             }
         }
@@ -1852,6 +2017,7 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
             teleported = teleport_random(&mut world, m, m.pos, 32.0);
             None
         } else {
+            let before_target = m.target;
             m.health -= amount;
             m.hurt_time = 10;
             if let Some(k) = knock {
@@ -1862,7 +2028,7 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
                 m.fire = m.fire.max(1);
             }
             match m.kind {
-                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf => {
+                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf | MobKind::Spider => {
                     // A tamed wolf does not turn on anyone; a wild one calls its pack.
                     if let Some(p) = by_player.filter(|_| m.owner.is_none()) {
                         m.angry = 400 + (entities::random() * 400.0) as u32;
@@ -1883,6 +2049,10 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
                     m.panic = 100;
                     m.wander = None;
                 }
+            }
+            // It turned on someone: the client must know (raised arms, anger).
+            if m.target != before_target {
+                server.broadcast_tracked(m.eid, &metadata(m), true);
             }
             let mut p = packet(id::play::DAMAGE_EVENT);
             let cause = by.map_or(0, |e| e + 1);

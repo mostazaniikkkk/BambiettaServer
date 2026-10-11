@@ -11,7 +11,7 @@ const check = (ok, what) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${what}`); if
 const b = mineflayer.createBot({ host, port, username: 'Archer', version: '1.20.4', auth: 'offline' })
 await once(b, 'spawn'); await sleep(1500)
 const Y = 150
-const skeleton = () => Object.values(b.entities).find(e => e.name === 'skeleton')
+const skeleton = () => Object.values(b.entities).filter(e => e.name === 'skeleton').sort((p, q) => p.position.distanceTo(b.entity.position) - q.position.distanceTo(b.entity.position))[0]
 const arena = async (X, Z) => {
   b.chat('/gamemode creative'); b.chat('/killmobs skeleton 200'); b.chat('/clear')
   b.chat(`/tp ${X} ${Y + 3} ${Z}`); await sleep(2500)

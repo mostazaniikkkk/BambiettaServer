@@ -7,6 +7,7 @@ pub mod blocks;
 pub mod brewing;
 pub mod commands;
 pub mod containers;
+pub mod doors;
 pub mod dragon;
 pub mod effects;
 pub mod enchanting;

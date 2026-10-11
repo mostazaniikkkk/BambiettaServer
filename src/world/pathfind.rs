@@ -50,6 +50,13 @@ struct Walker<'a> {
     height: f64,
     fits: Map<bool>,
     blocks: Map<u16>,
+    /// Closed wooden doors count as passable (zombies break them), at an extra cost.
+    doors: bool,
+}
+
+/// Wooden doors (the ones a zombie can break; iron and copper ones resist).
+pub fn wooden_door(name: &str) -> bool {
+    name.ends_with("_door") && !name.contains("iron") && !name.contains("copper")
 }
 
 impl Walker<'_> {
@@ -80,7 +87,16 @@ impl Walker<'_> {
         let g = gameplay::get();
         let top = a.max[1].ceil() as i32;
         (a.min[1].floor() as i32 - 1..top).any(|y| {
-            g.shape(self.block(BlockPos::new(p.x, y, p.z))).iter().any(|s| {
+            let state = self.block(BlockPos::new(p.x, y, p.z));
+            let block = data::get().block_of_state(state);
+            // A door is a thin panel on one edge of its cell: measured at the centre the mob
+            // would "fit" beside it, but walking through the cell it bumps into it. Closed, it
+            // blocks the whole cell (except wooden ones for mobs that break them).
+            if block.name.ends_with("_door") && y >= a.min[1].floor() as i32 {
+                let closed = block.get(state, "open") != Some("true");
+                return closed && !(self.doors && wooden_door(&block.name));
+            }
+            g.shape(state).iter().any(|s| {
                 let b = Aabb { min: [p.x as f64 + s[0], y as f64 + s[1], p.z as f64 + s[2]], max: [p.x as f64 + s[3], y as f64 + s[4], p.z as f64 + s[5]] };
                 b.intersects(a)
             })
@@ -117,8 +133,9 @@ impl Walker<'_> {
                 continue;
             }
             if self.stands(n) {
-                // Swimming is slower than walking.
-                out.push((n, if self.name(n) == "water" { 16 } else { 10 }));
+                // Swimming is slower than walking; breaking a door slower still.
+                let door = self.doors && (wooden_door(self.name(n)) || wooden_door(self.name(BlockPos::new(n.x, n.y + 1, n.z))));
+                out.push((n, if door { 40 } else if self.name(n) == "water" { 16 } else { 10 }));
             } else if !self.fits(n) {
                 let up = BlockPos::new(n.x, n.y + 1, n.z);
                 if head_free && self.stands(up) {
@@ -156,7 +173,7 @@ impl Walker<'_> {
 
 /// Whether a mob of that size can stand at `p` (safe ground, room above).
 pub fn standable(world: &mut World, p: BlockPos, width: f64, height: f64) -> bool {
-    Walker { world, width: width.min(0.98), height, fits: Map::default(), blocks: Map::default() }.stands(p)
+    Walker { world, width: width.min(0.98), height, fits: Map::default(), blocks: Map::default(), doors: false }.stands(p)
 }
 
 fn estimate(a: BlockPos, b: BlockPos) -> u32 {
@@ -167,9 +184,9 @@ fn estimate(a: BlockPos, b: BlockPos) -> u32 {
 
 /// Path from `start` towards `goal` (cells where the feet go, without `start`). If the goal
 /// cannot be reached within `max_nodes` explored cells, the path to the closest cell found;
-/// `None` if there is no progress at all.
-pub fn find(world: &mut World, start: BlockPos, goal: BlockPos, width: f64, height: f64, max_nodes: usize) -> Option<Vec<BlockPos>> {
-    let mut w = Walker { world, width: width.min(0.98), height, fits: Map::default(), blocks: Map::default() };
+/// `None` if there is no progress at all. `doors`: through closed wooden doors (zombies).
+pub fn find(world: &mut World, start: BlockPos, goal: BlockPos, width: f64, height: f64, max_nodes: usize, doors: bool) -> Option<Vec<BlockPos>> {
+    let mut w = Walker { world, width: width.min(0.98), height, fits: Map::default(), blocks: Map::default(), doors };
     let mut open = BinaryHeap::new();
     let mut came: Map<(BlockPos, u32)> = Map::default();
     came.insert(start, (start, 0));
@@ -234,7 +251,7 @@ mod tests {
     #[test]
     fn walks_straight_on_flat_ground() {
         let mut w = World::new_flat_for_tests();
-        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(8, Y, 0), 0.6, 1.95, 500).unwrap();
+        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(8, Y, 0), 0.6, 1.95, 500, false).unwrap();
         assert_eq!(p.last().unwrap().x, 7);
         assert!(p.iter().all(|c| c.y == Y));
     }
@@ -248,7 +265,7 @@ mod tests {
                 set(&mut w, 3, y, z, "stone");
             }
         }
-        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(6, Y, 0), 0.6, 1.95, 1000).unwrap();
+        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(6, Y, 0), 0.6, 1.95, 1000, false).unwrap();
         let end = *p.last().unwrap();
         assert!((end.x - 6).abs() <= 1 && end.z.abs() <= 1, "llega al otro lado: {end:?}");
         assert!(p.iter().any(|c| c.z.abs() > 5), "rodea la muralla");
@@ -261,7 +278,7 @@ mod tests {
         for z in -20..=20 {
             set(&mut w, 3, Y, z, "stone");
         }
-        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(6, Y, 0), 0.6, 1.95, 500).unwrap();
+        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(6, Y, 0), 0.6, 1.95, 500, false).unwrap();
         assert!(p.iter().any(|c| c.x == 3 && c.y == Y + 1), "sube el escalón: {p:?}");
         assert!(p.iter().all(|c| c.z.abs() <= 1), "no da la vuelta");
     }
@@ -272,7 +289,7 @@ mod tests {
         for z in -3..=3 {
             set(&mut w, 3, Y, z, "oak_fence");
         }
-        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(6, Y, 0), 0.6, 1.95, 1000).unwrap();
+        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(6, Y, 0), 0.6, 1.95, 1000, false).unwrap();
         assert!(p.iter().any(|c| c.z.abs() > 3), "rodea la valla: {p:?}");
     }
 
@@ -286,8 +303,50 @@ mod tests {
                 }
             }
         }
-        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(10, Y, 0), 0.6, 1.95, 1000).unwrap();
+        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(10, Y, 0), 0.6, 1.95, 1000, false).unwrap();
         assert_eq!(p.last().unwrap().x, 2, "se acerca a la pared más cercana al objetivo");
+    }
+
+    #[test]
+    fn zombies_go_through_doors() {
+        let mut w = World::new_flat_for_tests();
+        // A closed room with an oak door; the goal is inside.
+        for i in -3..=3 {
+            for y in Y..Y + 3 {
+                for (x, z) in [(i, -3), (i, 3), (-3, i), (3, i)] {
+                    set(&mut w, x, y, z, "stone");
+                }
+            }
+        }
+        let door = data::get().block("oak_door").unwrap();
+        let closed = door.with(door.default_state, "facing", "east");
+        w.set_block(BlockPos::new(3, Y, 0), closed);
+        w.set_block(BlockPos::new(3, Y + 1, 0), door.with(closed, "half", "upper"));
+        let without = find(&mut w, BlockPos::new(8, Y, 0), BlockPos::new(0, Y, 0), 0.6, 1.95, 1000, false).unwrap();
+        assert!(without.last().unwrap().x > 3, "sin romper puertas no entra: {without:?}");
+        let with = find(&mut w, BlockPos::new(8, Y, 0), BlockPos::new(0, Y, 0), 0.6, 1.95, 1000, true).unwrap();
+        assert!(with.iter().any(|c| c.x == 3 && c.z == 0), "pasa por la puerta: {with:?}");
+        assert!(with.last().unwrap().x <= 1, "llega adentro: {with:?}");
+    }
+
+    #[test]
+    fn around_the_end_of_a_wall_from_its_corner() {
+        let mut w = World::new_flat_for_tests();
+        for z in -7..=7 {
+            for y in Y..Y + 2 {
+                set(&mut w, 2, y, z, "cobblestone");
+            }
+        }
+        for x in -12..=12 {
+            for z in -12..=12 {
+                set(&mut w, x, Y + 4, z, "stone");
+            }
+        }
+        for start in [BlockPos::new(1, Y, -7), BlockPos::new(1, Y, -6), BlockPos::new(1, Y, 0)] {
+            let p = find(&mut w, start, BlockPos::new(5, Y, 0), 0.6, 1.95, 800, true).unwrap();
+            let end = *p.last().unwrap();
+            assert!((end.x - 5).abs() <= 1 && end.z.abs() <= 1, "desde {start:?} llega: {p:?}");
+        }
     }
 
     #[test]
@@ -302,7 +361,7 @@ mod tests {
         for y in Y..Y + 4 {
             set(&mut w, 2, y, 0, "ladder");
         }
-        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(3, Y + 4, 0), 0.6, 1.95, 1000).unwrap();
+        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(3, Y + 4, 0), 0.6, 1.95, 1000, false).unwrap();
         assert!(p.iter().any(|c| c.x == 2 && c.y == Y + 2), "sube por la escalera: {p:?}");
         assert!(p.last().unwrap().y >= Y + 3, "llega arriba: {p:?}");
     }
@@ -317,7 +376,7 @@ mod tests {
                 set(&mut w, x, Y - 2, z, "water");
             }
         }
-        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(9, Y, 0), 0.6, 1.95, 1000).unwrap();
+        let p = find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(9, Y, 0), 0.6, 1.95, 1000, false).unwrap();
         assert!((p.last().unwrap().x - 9).abs() <= 1, "cruza el canal: {p:?}");
         assert!(p.iter().all(|c| c.z.abs() <= 3), "no lo rodea (30 bloques): {p:?}");
     }
@@ -333,7 +392,7 @@ mod tests {
         }
         let t = std::time::Instant::now();
         for _ in 0..100 {
-            find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(10, Y, 0), 0.6, 1.95, 600);
+            find(&mut w, BlockPos::new(0, Y, 0), BlockPos::new(10, Y, 0), 0.6, 1.95, 600, false);
         }
         println!("{:?} por búsqueda de 600 nodos", t.elapsed() / 100);
     }

@@ -61,6 +61,7 @@ pub mod id {
         pub const SPAWN_XP_ORB: i32 = 0x02;
         pub const ANIMATION: i32 = 0x03;
         pub const ACK_DIGGING: i32 = 0x05;
+        pub const BLOCK_BREAK_ANIMATION: i32 = 0x06;
         pub const BLOCK_ACTION: i32 = 0x08;
         pub const BLOCK_CHANGE: i32 = 0x09;
         pub const DIFFICULTY: i32 = 0x0b;

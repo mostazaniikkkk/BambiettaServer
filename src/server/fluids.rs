@@ -387,7 +387,10 @@ pub fn use_bucket(server: &Arc<Server>, player: &Arc<Player>, hand: i32) -> bool
         (st.inv.held(hand, st.held_slot).clone(), st.eye(), st.yaw, st.pitch, st.game_mode)
     };
     let Some(item) = item else { return false };
-    let name = item.name();
+    // A bucket with a fish (or an axolotl, a tadpole) pours its water and lets it out.
+    let creature = super::wildlife::from_bucket(&item);
+    let name = if creature.is_some() { "water_bucket" } else { item.name() };
+    let mut released: Option<BlockPos> = None;
     if !matches!(name, "bucket" | "water_bucket" | "lava_bucket") || game_mode == 3 {
         return false;
     }
@@ -420,6 +423,7 @@ pub fn use_bucket(server: &Arc<Server>, player: &Arc<Player>, hand: i32) -> bool
             if passable(&mut world, target) || fluid_at(&mut world, target).is_some() {
                 set(&mut world, target, state_for(kind, 0), &mut changes, &mut follow);
                 follow.push((target, kind.delay(dim)));
+                released = Some(target);
                 Some("bucket")
             } else {
                 None
@@ -433,6 +437,12 @@ pub fn use_bucket(server: &Arc<Server>, player: &Arc<Player>, hand: i32) -> bool
     }
     for (p, d) in follow {
         schedule(server, dim, p, d);
+    }
+    if let (Some((kind, variant)), Some(at)) = (creature, released) {
+        let eid = super::mobs::spawn(server, dim, kind, [at.x as f64 + 0.5, at.y as f64 + 0.1, at.z as f64 + 0.5]);
+        if let (Some(v), Some(m)) = (variant, server.mobs.lock().unwrap().get_mut(&eid)) {
+            m.variant = v;
+        }
     }
     let Some(new_item) = result else {
         // Rejected: the client may have predicted something; resend the slot.

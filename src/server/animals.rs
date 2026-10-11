@@ -34,14 +34,37 @@ pub struct Other {
     pub grow: i32,
     /// Has an owner (tamed).
     pub tame: bool,
+    /// Slime or magma cube size.
+    pub size: i32,
 }
 
 pub fn snapshot<'a>(mobs: impl Iterator<Item = &'a Mob>) -> Vec<Other> {
-    mobs.filter(|m| m.death_ticks.is_none()).map(|m| Other { eid: m.eid, kind: m.kind, pos: m.pos, love: m.love, grow: m.grow, tame: m.owner.is_some() }).collect()
+    mobs.filter(|m| m.death_ticks.is_none()).map(|m| Other { eid: m.eid, kind: m.kind, pos: m.pos, love: m.love, grow: m.grow, tame: m.owner.is_some(), size: m.size }).collect()
 }
 
 pub fn breeds(kind: MobKind) -> bool {
-    matches!(kind, MobKind::Cow | MobKind::Pig | MobKind::Sheep | MobKind::Chicken | MobKind::Wolf | MobKind::Cat | MobKind::Ocelot)
+    matches!(
+        kind,
+        MobKind::Cow
+            | MobKind::Pig
+            | MobKind::Sheep
+            | MobKind::Chicken
+            | MobKind::Wolf
+            | MobKind::Cat
+            | MobKind::Ocelot
+            | MobKind::Horse
+            | MobKind::Donkey
+            | MobKind::Mule
+            | MobKind::Llama
+            | MobKind::Rabbit
+            | MobKind::Fox
+            | MobKind::Turtle
+            | MobKind::Goat
+            | MobKind::Frog
+            | MobKind::Axolotl
+            | MobKind::PolarBear
+            | MobKind::Panda
+    )
 }
 
 /// Food that makes an animal fall in love (and that it follows).
@@ -53,6 +76,14 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
         MobKind::Wolf => is_meat(item),
         MobKind::Cat | MobKind::Ocelot => matches!(item, "cod" | "salmon"),
         MobKind::Bee => super::bees::is_flower(item),
+        k if super::horses::is_horse(k) => super::horses::is_food(k, item),
+        MobKind::Rabbit => matches!(item, "carrot" | "golden_carrot" | "dandelion"),
+        MobKind::Fox => matches!(item, "sweet_berries" | "glow_berries"),
+        MobKind::Turtle => item == "seagrass",
+        MobKind::Goat => item == "wheat",
+        MobKind::Frog => item == "slime_ball",
+        MobKind::Axolotl => item == "tropical_fish_bucket",
+        MobKind::Panda => item == "bamboo",
         _ => false,
     }
 }
@@ -74,6 +105,10 @@ pub fn behave(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], a
         m.grow += 1;
         if m.grow == 0 {
             actions.push(Action::Meta(mobs::metadata(m), m.eid));
+            // A turtle that grows up sheds a scute.
+            if m.kind == MobKind::Turtle {
+                actions.push(Action::Drop(m.dim, m.pos, "scute".into()));
+            }
         }
     } else if m.grow > 0 {
         m.grow -= 1;
@@ -109,7 +144,7 @@ pub fn behave(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], a
         }
         let partner = others
             .iter()
-            .filter(|o| o.eid != m.eid && o.kind == m.kind && o.love > 0 && o.grow == 0 && mobs::dist2(&o.pos, &m.pos) < 8.0 * 8.0)
+            .filter(|o| o.eid != m.eid && (o.kind == m.kind || matches!((m.kind, o.kind), (MobKind::Horse, MobKind::Donkey) | (MobKind::Donkey, MobKind::Horse))) && o.love > 0 && o.grow == 0 && mobs::dist2(&o.pos, &m.pos) < 8.0 * 8.0)
             .min_by(|a, b| mobs::dist2(&a.pos, &m.pos).total_cmp(&mobs::dist2(&b.pos, &m.pos)));
         if let Some(p) = partner {
             if mobs::dist2(&p.pos, &m.pos) < 1.6 * 1.6 {
@@ -145,7 +180,7 @@ pub fn behave(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], a
 /// wild wolves also cats; cats want creepers, and stray cats fight each other.
 fn wants(m: &Mob, o: &Other) -> Option<u8> {
     match (m.kind, o.kind) {
-        (MobKind::Wolf, MobKind::Skeleton) => Some(0),
+        (MobKind::Wolf, MobKind::Skeleton | MobKind::Stray) => Some(0),
         (MobKind::Wolf, MobKind::Cat) if m.owner.is_none() => Some(1),
         (MobKind::Cat, MobKind::Creeper) => Some(0),
         (MobKind::Cat, MobKind::Cat) if m.owner.is_none() && !o.tame && o.eid != m.eid => Some(1),
@@ -180,11 +215,11 @@ fn hunt(world: &mut World, m: &mut Mob, others: &[Other], actions: &mut Vec<Acti
     if d < 1.8 && m.attack_cooldown == 0 {
         m.attack_cooldown = 20;
         let bite = match (m.kind, prey.kind) {
-            (MobKind::Wolf, MobKind::Skeleton) => 8.0,
+            (MobKind::Wolf, MobKind::Skeleton | MobKind::Stray) => 8.0,
             (MobKind::Wolf, _) => 4.0,
             _ => 3.0,
         };
-        actions.push(Action::HurtMob(prey.eid, bite, m.eid));
+        actions.push(Action::HurtMob(prey.eid, bite, m.eid, None));
     }
     Some((mobs::follow_path(world, m, prey.pos), m.kind.walk_speed() * 1.4))
 }
@@ -398,10 +433,23 @@ pub fn breed(server: &Arc<Server>, dim: crate::world::Dimension, kind: MobKind, 
             }
         }
     }
-    let baby = mobs::spawn(server, dim, kind, at);
-    if let Some(m) = server.mobs.lock().unwrap().get_mut(&baby) {
-        m.grow = BABY;
-        m.owner = owner;
+    // Turtles and frogs lay eggs instead (the mother goes off to lay them).
+    if matches!(kind, MobKind::Turtle | MobKind::Frog) {
+        if let Some(m) = server.mobs.lock().unwrap().get_mut(&parents.0) {
+            m.egg = true;
+        }
+    } else {
+        // A horse and a donkey have a mule.
+        let kinds: Vec<MobKind> = {
+            let map = server.mobs.lock().unwrap();
+            [parents.0, parents.1].iter().filter_map(|e| map.get(e).map(|m| m.kind)).collect()
+        };
+        let kind = if kinds.contains(&MobKind::Horse) && kinds.contains(&MobKind::Donkey) { MobKind::Mule } else { kind };
+        let baby = mobs::spawn(server, dim, kind, at);
+        if let Some(m) = server.mobs.lock().unwrap().get_mut(&baby) {
+            m.grow = BABY;
+            m.owner = owner.filter(|_| !super::horses::is_horse(kind));
+        }
     }
     let player = by.and_then(|e| server.players.read().unwrap().get(&e).cloned());
     if let Some(p) = &player {

@@ -47,7 +47,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "food", usage: "/food <0-20> [jugador]", help: "Fijar el hambre (QA)", op: true, run: food },
     Command { name: "enchant", usage: "/enchant <encantamiento> [nivel] [jugador]", help: "Encantar el ítem de la mano", op: true, run: enchant },
     Command { name: "xp", usage: "/xp <cantidad>[L] [jugador]", help: "Dar experiencia (L = niveles)", op: true, run: xp },
-    Command { name: "summon", usage: "/summon <mob|barco|minecart> [profesión|tamaño|patrulla|capitan]", help: "Invocar un mob o un vehículo", op: true, run: summon },
+    Command { name: "summon", usage: "/summon <mob|barco|minecart> [x y z] [profesión|tamaño|patrulla|capitan]", help: "Invocar un mob o un vehículo", op: true, run: summon },
     Command { name: "killmobs", usage: "/killmobs [tipo|all] [radio]", help: "Matar mobs cercanos (QA)", op: true, run: killmobs },
     Command { name: "setblock", usage: "/setblock <x y z> <bloque[prop=valor,...]>", help: "Poner un bloque", op: true, run: setblock },
     Command { name: "fill", usage: "/fill <x1 y1 z1> <x2 y2 z2> <bloque>", help: "Rellenar una zona (máx. 32768)", op: true, run: fill },
@@ -590,11 +590,17 @@ fn xp(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
 fn summon(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
     let mut it = args.split_whitespace();
     let name = it.next().ok_or_default()?.trim_start_matches("minecraft:");
-    let extra = it.next();
+    let rest: Vec<&str> = it.collect();
+    // Optional coordinates (x y z) before the extra argument.
+    let at: Option<[f64; 3]> = (rest.len() >= 3).then(|| {
+        let v: Vec<f64> = rest[..3].iter().filter_map(|t| t.parse().ok()).collect();
+        (v.len() == 3).then(|| [v[0], v[1], v[2]])
+    }).flatten();
+    let extra = if at.is_some() { rest.get(3).copied() } else { rest.first().copied() };
     let (pos, yaw) = {
         let st = p.state.lock().unwrap();
         let (sy, cy) = (st.yaw.to_radians() as f64).sin_cos();
-        ([st.x - sy * 2.0, st.y, st.z + cy * 2.0], st.yaw)
+        (at.unwrap_or([st.x - sy * 2.0, st.y, st.z + cy * 2.0]), st.yaw)
     };
     let vehicle = match name {
         "boat" => Some(super::vehicles::VehicleKind::Boat(0, false)),
@@ -620,9 +626,10 @@ fn summon(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
         return Ok(());
     }
     let eid = super::mobs::spawn(s, p.dim(), kind, pos);
+    super::mobs::biome_variant(s, eid);
     match (kind, extra) {
         (super::mobs::MobKind::Pillager, Some("capitan" | "capitán" | "captain")) => super::pillagers::make_captain(s, eid, 1 + (super::entities::random() * 1e9) as u32),
-        (super::mobs::MobKind::MagmaCube, Some(n)) => super::mobs::set_size(s, eid, n.parse().map_err(|_| format!("Tamaño inválido: {n}"))?),
+        (super::mobs::MobKind::MagmaCube | super::mobs::MobKind::Slime, Some(n)) => super::mobs::set_size(s, eid, n.parse().map_err(|_| format!("Tamaño inválido: {n}"))?),
         (super::mobs::MobKind::Villager, Some(prof)) => {
             if let Some(m) = s.mobs.lock().unwrap().get_mut(&eid) {
                 m.villager = Some(Box::new(super::villagers::VillagerData::with_profession(prof)));
@@ -702,11 +709,11 @@ fn parse_pos(p: &Player, parts: &[&str]) -> Result<crate::protocol::BlockPos, St
     Ok(crate::protocol::BlockPos::new(block_coord(parts[0], x)?, block_coord(parts[1], y)?, block_coord(parts[2], z)?))
 }
 
-fn place_blocks(s: &Arc<Server>, dim: crate::world::Dimension, a: crate::protocol::BlockPos, b: crate::protocol::BlockPos, name: &str) -> Result<usize, String> {
-    // Vanilla syntax: name[prop=value,...]
-    let (name, props) = match name.split_once('[') {
+/// A block state written like vanilla: `name[prop=value,...]`.
+pub fn parse_state(spec: &str) -> Result<u16, String> {
+    let (name, props) = match spec.split_once('[') {
         Some((n, rest)) => (n, rest.trim_end_matches(']')),
-        None => (name, ""),
+        None => (spec, ""),
     };
     let block = crate::data::get().block(name).ok_or_else(|| format!("Bloque desconocido: {name}"))?;
     let mut state = block.default_state;
@@ -717,6 +724,12 @@ fn place_blocks(s: &Arc<Server>, dim: crate::world::Dimension, a: crate::protoco
         }
         state = block.with(state, k.trim(), v.trim());
     }
+    Ok(state)
+}
+
+fn place_blocks(s: &Arc<Server>, dim: crate::world::Dimension, a: crate::protocol::BlockPos, b: crate::protocol::BlockPos, name: &str) -> Result<usize, String> {
+    let state = parse_state(name)?;
+    let name = name.split('[').next().unwrap_or(name);
     let (x0, x1) = (a.x.min(b.x), a.x.max(b.x));
     let (y0, y1) = (a.y.min(b.y).max(dim.min_y()), a.y.max(b.y).min(dim.min_y() + dim.height() - 1));
     let (z0, z1) = (a.z.min(b.z), a.z.max(b.z));

@@ -518,6 +518,11 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         set(server, dim, p, s);
     }
     set(server, dim, target, state);
+    // A pumpkin on top of a T of iron blocks: an iron golem.
+    if matches!(block.name.as_str(), "carved_pumpkin" | "jack_o_lantern") && super::golems::try_build(server, dim, target) {
+        consume(player, game_mode, req.hand, &stack);
+        return;
+    }
     if matches!(block.name.as_str(), "wheat" | "carrots" | "potatoes" | "beetroots" | "melon_stem" | "pumpkin_stem" | "torchflower_crop" | "pitcher_crop" | "nether_wart") {
         super::advancements::grant(server, player, "husbandry/plant_seed");
     }

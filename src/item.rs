@@ -37,7 +37,7 @@ impl ItemStack {
         Self { count, ..self.clone() }
     }
 
-    fn tag_mut(&mut self) -> &mut Nbt {
+    pub fn tag_mut(&mut self) -> &mut Nbt {
         self.nbt.get_or_insert_with(|| Box::new(Nbt::Compound(vec![])))
     }
 

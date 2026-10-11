@@ -81,6 +81,7 @@ pub mod id {
         pub const GAME_STATE_CHANGE: i32 = 0x20;
         pub const INITIALIZE_WORLD_BORDER: i32 = 0x23;
         pub const ADVANCEMENTS: i32 = 0x70;
+        pub const OPEN_HORSE_WINDOW: i32 = 0x21;
         pub const KEEP_ALIVE: i32 = 0x24;
         pub const MAP_CHUNK: i32 = 0x25;
         pub const WORLD_EVENT: i32 = 0x26;

@@ -157,6 +157,10 @@ pub fn damage(server: &Arc<Server>, player: &Arc<Player>, amount: f32, kind: &st
     if player.state.lock().unwrap().sleeping.is_some() && amount > 0.0 {
         super::beds::wake(server, player);
     }
+    // And scares the parrot off the shoulder.
+    if amount > 0.0 && player.state.lock().unwrap().survival_like() {
+        super::pets::unperch(server, player);
+    }
     let bypass = matches!(kind, "out_of_world" | "generic_kill");
     // Damage turned off by game rules.
     let off = match kind {
@@ -168,7 +172,7 @@ pub fn damage(server: &Arc<Server>, player: &Arc<Player>, amount: f32, kind: &st
     if off {
         return false;
     }
-    let (died, broken) = {
+    let (died, broken, totem) = {
         let mut st = player.state.lock().unwrap();
         if st.dead || amount <= 0.0 || (!st.survival_like() && !bypass) || st.game_mode == 3 {
             return false;
@@ -224,9 +228,29 @@ pub fn damage(server: &Arc<Server>, player: &Arc<Player>, amount: f32, kind: &st
         st.health = (st.health - amount).max(0.0);
         st.exhaustion += 0.1;
         st.eating = None;
+        // A Totem of Undying in either hand cheats death (not the void or /kill).
+        let mut totem = false;
+        if st.health <= 0.0 && !bypass {
+            let main = super::inventory::HOTBAR + st.held_slot;
+            if let Some(slot) = [main, super::inventory::OFFHAND].into_iter().find(|&s| st.inv.slots[s].as_ref().is_some_and(|i| i.name() == "totem_of_undying")) {
+                st.inv.slots[slot] = None;
+                st.sync_slot(player, slot);
+                st.health = 1.0;
+                totem = true;
+            }
+        }
         player.send(health_packet(st.health, st.food, st.saturation));
-        (st.health <= 0.0, broken)
+        (st.health <= 0.0, broken, totem)
     };
+    if totem {
+        super::effects::clear(server, player);
+        super::effects::add(server, player, "regeneration", 1, 900, 1.0);
+        super::effects::add(server, player, "absorption", 1, 100, 1.0);
+        super::effects::add(server, player, "fire_resistance", 0, 800, 1.0);
+        let mut p = packet(id::play::ENTITY_STATUS);
+        p.i32(player.eid).i8(35);
+        server.broadcast_tracked(player.eid, &p, true);
+    }
     for status in &broken {
         let mut p = packet(id::play::ENTITY_STATUS);
         p.i32(player.eid).i8(*status);
@@ -332,6 +356,7 @@ pub async fn respawn(server: &Arc<Server>, player: &Arc<Player>) {
             return;
         }
         st.dead = false;
+        st.rest = 0;
         (st.x, st.y, st.z) = (x, y, z);
         st.health = 20.0;
         st.food = 20;
@@ -459,6 +484,7 @@ pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
     super::portals::tick_player(server, player);
     super::effects::tick(server, player);
     let mut leftovers = Vec::new();
+    let mut drop_parrot = false;
     let mut ate = false;
     let mut after = None;
     let (pos, sneaking, survival) = {
@@ -467,6 +493,13 @@ pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
             return;
         }
         st.hurt_cooldown = st.hurt_cooldown.saturating_sub(1);
+        if st.sleeping.is_none() {
+            st.rest += 1;
+        }
+        // A parrot on the shoulder jumps off when the player falls or sleeps.
+        if st.shoulder.is_some() && (st.fall_distance > 0.5 || st.sleeping.is_some()) {
+            drop_parrot = true;
+        }
         // The crafting table closes if the player walks away (like vanilla's stillValid).
         if let Some(w) = &st.inv.window {
             let d2 = (w.pos.x as f64 + 0.5 - st.x).powi(2) + (w.pos.y as f64 + 0.5 - st.y).powi(2) + (w.pos.z as f64 + 0.5 - st.z).powi(2);
@@ -493,6 +526,9 @@ pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
         }
         ([st.x, st.y, st.z], st.sneaking, st.survival_like())
     };
+    if drop_parrot {
+        super::pets::unperch(server, player);
+    }
     for item in leftovers {
         entities::throw_from(server, player, item);
     }

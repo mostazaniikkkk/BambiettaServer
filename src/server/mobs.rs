@@ -22,6 +22,61 @@ use std::sync::Arc;
 /// Maximum monsters and animals near each player.
 const HOSTILE_CAP: usize = 20;
 const PASSIVE_CAP: usize = 10;
+const WATER_CAP: usize = 8;
+
+/// Which animals live in each biome, and on what ground: (kind, group size).
+fn animal_for(biome: &str, ground: &str, village: bool) -> Option<(MobKind, i32)> {
+    let r = entities::random();
+    let group = 2 + (entities::random() * 2.0) as i32;
+    let farm = || [MobKind::Cow, MobKind::Pig, MobKind::Sheep, MobKind::Chicken][(entities::random() * 4.0) as usize % 4];
+    match (biome, ground) {
+        ("desert", "sand") => (r < 0.3).then_some((MobKind::Rabbit, 2)),
+        ("beach", "sand") => (r < 0.4).then_some((MobKind::Turtle, 2 + (entities::random() * 3.0) as i32)),
+        ("snowy_slopes" | "stony_peaks", "snow_block" | "stone" | "grass_block" | "powder_snow") => (r < 0.5).then_some((MobKind::Goat, 2)),
+        ("snowy_plains" | "snowy_beach", _) if r < 0.15 => Some((MobKind::PolarBear, 1 + i32::from(entities::random() < 0.3))),
+        ("snowy_plains" | "snowy_taiga", "grass_block" | "snow_block") => Some((MobKind::Rabbit, 2)),
+        (_, "grass_block") => Some(match biome {
+            "taiga" | "snowy_taiga" if r < 0.3 => (MobKind::Fox, 2),
+            "taiga" | "snowy_taiga" | "flower_forest" if r < 0.45 => (MobKind::Rabbit, 2),
+            b if (b.contains("forest") || b.contains("taiga")) && r < 0.25 => (MobKind::Wolf, group),
+            "jungle" if r < 0.25 => (MobKind::Ocelot, 1),
+            "jungle" if r < 0.5 => (MobKind::Parrot, 1 + (entities::random() * 2.0) as i32),
+            "jungle" if r < 0.6 => (MobKind::Panda, 2),
+            "plains" | "sunflower_plains" | "savanna" if r < 0.15 => (MobKind::Horse, group),
+            "plains" | "sunflower_plains" | "savanna" if r < 0.2 => (MobKind::Donkey, 2),
+            "savanna" | "windswept_hills" if r < 0.3 => (MobKind::Llama, group),
+            "swamp" if r < 0.4 => (MobKind::Frog, group),
+            _ if village && r < 0.3 => (MobKind::Cat, 1),
+            _ => (farm(), group),
+        }),
+        _ => None,
+    }
+}
+
+/// Which water creature lives here: (kind, group size). `deep` = out of the sky's reach.
+fn water_creature_for(biome: &str, deep: bool, world: &mut World, at: [f64; 3]) -> Option<(MobKind, i32)> {
+    let r = entities::random();
+    if deep {
+        // Dark water underground: glow squid, and now and then axolotls.
+        if at[1] > 30.0 || block_lit(world, at) {
+            return None;
+        }
+        return Some(if r < 0.2 { (MobKind::Axolotl, 1 + (entities::random() * 3.0) as i32) } else { (MobKind::GlowSquid, 2) });
+    }
+    Some(match biome {
+        "warm_ocean" if r < 0.15 => (MobKind::Dolphin, 2),
+        "warm_ocean" if r < 0.35 => (MobKind::Pufferfish, 1),
+        "warm_ocean" => (MobKind::TropicalFish, 4),
+        "ocean" | "deep_ocean" if r < 0.1 => (MobKind::Dolphin, 2),
+        "ocean" | "deep_ocean" if r < 0.3 => (MobKind::Squid, 2),
+        "ocean" | "deep_ocean" => (MobKind::Cod, 4),
+        "frozen_ocean" | "frozen_river" => (MobKind::Salmon, 3),
+        "river" if r < 0.3 => (MobKind::Squid, 1),
+        "river" => (MobKind::Salmon, 3),
+        "swamp" if r < 0.2 => (MobKind::Tadpole, 2),
+        _ => return None,
+    })
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum MobKind {
@@ -54,9 +109,41 @@ pub enum MobKind {
     Cat,
     Ocelot,
     Bee,
+    Witch,
+    Slime,
+    Drowned,
+    Phantom,
+    ZombieVillager,
+    Husk,
+    Stray,
+    IronGolem,
+    Horse,
+    Donkey,
+    Mule,
+    Rabbit,
+    Fox,
+    Turtle,
+    Cod,
+    Salmon,
+    TropicalFish,
+    Pufferfish,
+    Squid,
+    GlowSquid,
+    Dolphin,
+    Goat,
+    Frog,
+    Tadpole,
+    Axolotl,
+    PolarBear,
+    Llama,
+    Panda,
+    Parrot,
+    Ravager,
+    Evoker,
+    Vex,
 }
 
-pub const ALL: [MobKind; 29] = [
+pub const ALL: [MobKind; 61] = [
     MobKind::Cow,
     MobKind::Pig,
     MobKind::Sheep,
@@ -86,6 +173,38 @@ pub const ALL: [MobKind; 29] = [
     MobKind::Cat,
     MobKind::Ocelot,
     MobKind::Bee,
+    MobKind::Witch,
+    MobKind::Slime,
+    MobKind::Drowned,
+    MobKind::Phantom,
+    MobKind::ZombieVillager,
+    MobKind::Husk,
+    MobKind::Stray,
+    MobKind::IronGolem,
+    MobKind::Horse,
+    MobKind::Donkey,
+    MobKind::Mule,
+    MobKind::Rabbit,
+    MobKind::Fox,
+    MobKind::Turtle,
+    MobKind::Cod,
+    MobKind::Salmon,
+    MobKind::TropicalFish,
+    MobKind::Pufferfish,
+    MobKind::Squid,
+    MobKind::GlowSquid,
+    MobKind::Dolphin,
+    MobKind::Goat,
+    MobKind::Frog,
+    MobKind::Tadpole,
+    MobKind::Axolotl,
+    MobKind::PolarBear,
+    MobKind::Llama,
+    MobKind::Panda,
+    MobKind::Parrot,
+    MobKind::Ravager,
+    MobKind::Evoker,
+    MobKind::Vex,
 ];
 
 impl MobKind {
@@ -120,6 +239,38 @@ impl MobKind {
             MobKind::Cat => "cat",
             MobKind::Ocelot => "ocelot",
             MobKind::Bee => "bee",
+            MobKind::Witch => "witch",
+            MobKind::Slime => "slime",
+            MobKind::Drowned => "drowned",
+            MobKind::Phantom => "phantom",
+            MobKind::ZombieVillager => "zombie_villager",
+            MobKind::Husk => "husk",
+            MobKind::Stray => "stray",
+            MobKind::IronGolem => "iron_golem",
+            MobKind::Horse => "horse",
+            MobKind::Donkey => "donkey",
+            MobKind::Mule => "mule",
+            MobKind::Rabbit => "rabbit",
+            MobKind::Fox => "fox",
+            MobKind::Turtle => "turtle",
+            MobKind::Cod => "cod",
+            MobKind::Salmon => "salmon",
+            MobKind::TropicalFish => "tropical_fish",
+            MobKind::Pufferfish => "pufferfish",
+            MobKind::Squid => "squid",
+            MobKind::GlowSquid => "glow_squid",
+            MobKind::Dolphin => "dolphin",
+            MobKind::Goat => "goat",
+            MobKind::Frog => "frog",
+            MobKind::Tadpole => "tadpole",
+            MobKind::Axolotl => "axolotl",
+            MobKind::PolarBear => "polar_bear",
+            MobKind::Llama => "llama",
+            MobKind::Panda => "panda",
+            MobKind::Parrot => "parrot",
+            MobKind::Ravager => "ravager",
+            MobKind::Evoker => "evoker",
+            MobKind::Vex => "vex",
         }
     }
 
@@ -158,6 +309,38 @@ impl MobKind {
             MobKind::Cat => "Gato",
             MobKind::Ocelot => "Ocelote",
             MobKind::Bee => "Abeja",
+            MobKind::Witch => "Bruja",
+            MobKind::Slime => "Slime",
+            MobKind::Drowned => "Ahogado",
+            MobKind::Phantom => "Phantom",
+            MobKind::ZombieVillager => "Aldeano zombi",
+            MobKind::Husk => "Zombi momificado",
+            MobKind::Stray => "Esqueleto glacial",
+            MobKind::IronGolem => "Gólem de hierro",
+            MobKind::Horse => "Caballo",
+            MobKind::Donkey => "Burro",
+            MobKind::Mule => "Mula",
+            MobKind::Rabbit => "Conejo",
+            MobKind::Fox => "Zorro",
+            MobKind::Turtle => "Tortuga",
+            MobKind::Cod => "Bacalao",
+            MobKind::Salmon => "Salmón",
+            MobKind::TropicalFish => "Pez tropical",
+            MobKind::Pufferfish => "Pez globo",
+            MobKind::Squid => "Calamar",
+            MobKind::GlowSquid => "Calamar brillante",
+            MobKind::Dolphin => "Delfín",
+            MobKind::Goat => "Cabra",
+            MobKind::Frog => "Rana",
+            MobKind::Tadpole => "Renacuajo",
+            MobKind::Axolotl => "Ajolote",
+            MobKind::PolarBear => "Oso polar",
+            MobKind::Llama => "Llama",
+            MobKind::Panda => "Panda",
+            MobKind::Parrot => "Loro",
+            MobKind::Ravager => "Devastador",
+            MobKind::Evoker => "Invocador",
+            MobKind::Vex => "Vex",
         }
     }
 
@@ -182,7 +365,61 @@ impl MobKind {
                 | MobKind::Silverfish
                 | MobKind::CaveSpider
                 | MobKind::Vindicator
+                | MobKind::Witch
+                | MobKind::Slime
+                | MobKind::Drowned
+                | MobKind::Phantom
+                | MobKind::ZombieVillager
+                | MobKind::Husk
+                | MobKind::Stray
+                | MobKind::Ravager
+                | MobKind::Evoker
+                | MobKind::Vex
         )
+    }
+
+    /// Zombies and their variants (break doors, hunt villagers, chase in packs).
+    pub fn zombie_like(self) -> bool {
+        matches!(self, MobKind::Zombie | MobKind::Husk | MobKind::Drowned | MobKind::ZombieVillager)
+    }
+
+    /// Skeletons that shoot with a bow.
+    pub fn skeleton_like(self) -> bool {
+        matches!(self, MobKind::Skeleton | MobKind::Stray)
+    }
+
+    /// Undead that catch fire in sunlight (husks do not).
+    pub fn burns_in_sun(self) -> bool {
+        matches!(self, MobKind::Zombie | MobKind::Skeleton | MobKind::Stray | MobKind::Drowned | MobKind::ZombieVillager | MobKind::Phantom)
+    }
+
+    /// Hopping cubes that split when they die.
+    pub fn cube(self) -> bool {
+        matches!(self, MobKind::MagmaCube | MobKind::Slime)
+    }
+
+    /// Lives in the water: swims at any depth instead of floating up.
+    pub fn swims(self) -> bool {
+        self == MobKind::Drowned || self.aquatic()
+    }
+
+    /// Water animals (some also walk on land: turtles, frogs, axolotls).
+    pub fn aquatic(self) -> bool {
+        self.fish()
+            || matches!(self, MobKind::Squid | MobKind::GlowSquid | MobKind::Dolphin | MobKind::Tadpole | MobKind::Axolotl | MobKind::Turtle | MobKind::Frog)
+    }
+
+    pub fn fish(self) -> bool {
+        matches!(self, MobKind::Cod | MobKind::Salmon | MobKind::TropicalFish | MobKind::Pufferfish)
+    }
+
+    /// Water creatures that come and go like monsters (despawn far from players).
+    fn water_ambient(self) -> bool {
+        self.fish() || matches!(self, MobKind::Squid | MobKind::GlowSquid)
+    }
+
+    pub fn melee_damage(self) -> f32 {
+        self.melee()
     }
 
     /// Attacks players unprovoked.
@@ -197,7 +434,36 @@ impl MobKind {
             MobKind::Sheep => (0.9, 1.3),
             MobKind::Chicken => (0.4, 0.7),
             MobKind::Zombie | MobKind::Villager | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::Pillager | MobKind::Vindicator => (0.6, 1.95),
-            MobKind::Skeleton => (0.6, 1.99),
+            MobKind::Witch | MobKind::Drowned | MobKind::ZombieVillager | MobKind::Husk => (0.6, 1.95),
+            MobKind::Skeleton | MobKind::Stray => (0.6, 1.99),
+            MobKind::Slime => (0.52, 0.52),
+            MobKind::Phantom => (0.9, 0.5),
+            MobKind::IronGolem => (1.4, 2.7),
+            MobKind::Horse => (1.3965, 1.6),
+            MobKind::Donkey => (1.3965, 1.5),
+            MobKind::Mule => (1.3965, 1.6),
+            MobKind::Rabbit => (0.4, 0.5),
+            MobKind::Fox => (0.6, 0.7),
+            MobKind::Turtle => (1.2, 0.4),
+            MobKind::Cod => (0.5, 0.3),
+            MobKind::Salmon => (0.7, 0.4),
+            MobKind::TropicalFish => (0.5, 0.4),
+            MobKind::Pufferfish => (0.7, 0.7),
+            MobKind::Squid => (0.8, 0.8),
+            MobKind::GlowSquid => (0.8, 0.8),
+            MobKind::Dolphin => (0.9, 0.6),
+            MobKind::Goat => (0.9, 1.3),
+            MobKind::Frog => (0.5, 0.5),
+            MobKind::Tadpole => (0.4, 0.3),
+            MobKind::Axolotl => (0.75, 0.42),
+            MobKind::PolarBear => (1.4, 1.4),
+            MobKind::Llama => (0.9, 1.87),
+            MobKind::Panda => (1.3, 1.25),
+            MobKind::Parrot => (0.5, 0.9),
+            MobKind::Ravager => (1.95, 2.2),
+            MobKind::Evoker => (0.6, 1.95),
+            MobKind::Vex => (0.4, 0.8),
+
             MobKind::Creeper => (0.6, 1.7),
             MobKind::Spider => (1.4, 0.9),
             MobKind::Blaze => (0.6, 1.8),
@@ -226,6 +492,33 @@ impl MobKind {
             MobKind::Spider | MobKind::Piglin => 16.0,
             MobKind::CaveSpider => 12.0,
             MobKind::Pillager | MobKind::Vindicator => 24.0,
+            MobKind::Witch => 26.0,
+            MobKind::IronGolem => 100.0,
+            MobKind::Horse => 22.0,
+            MobKind::Donkey => 22.0,
+            MobKind::Mule => 22.0,
+            MobKind::Rabbit => 3.0,
+            MobKind::Fox => 10.0,
+            MobKind::Turtle => 30.0,
+            MobKind::Cod => 3.0,
+            MobKind::Salmon => 3.0,
+            MobKind::TropicalFish => 3.0,
+            MobKind::Pufferfish => 3.0,
+            MobKind::Squid => 10.0,
+            MobKind::GlowSquid => 10.0,
+            MobKind::Dolphin => 10.0,
+            MobKind::Goat => 10.0,
+            MobKind::Frog => 10.0,
+            MobKind::Tadpole => 6.0,
+            MobKind::Axolotl => 14.0,
+            MobKind::PolarBear => 30.0,
+            MobKind::Llama => 22.0,
+            MobKind::Panda => 20.0,
+            MobKind::Parrot => 6.0,
+            MobKind::Ravager => 100.0,
+            MobKind::Evoker => 24.0,
+            MobKind::Vex => 14.0,
+
             MobKind::Wolf => 8.0,
             MobKind::Hoglin | MobKind::Enderman => 40.0,
             MobKind::EnderDragon => 200.0,
@@ -241,7 +534,35 @@ impl MobKind {
             MobKind::Spider | MobKind::CaveSpider => 0.11,
             MobKind::Silverfish => 0.09,
             MobKind::Zombie | MobKind::Creeper | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::Endermite => 0.08,
-            MobKind::Skeleton | MobKind::WitherSkeleton | MobKind::Hoglin => 0.09,
+            MobKind::Husk | MobKind::Drowned | MobKind::ZombieVillager | MobKind::Witch => 0.08,
+            MobKind::Skeleton | MobKind::Stray | MobKind::WitherSkeleton | MobKind::Hoglin => 0.09,
+            MobKind::Phantom => 0.18,
+            MobKind::IronGolem => 0.07,
+            MobKind::Horse => 0.07,
+            MobKind::Donkey => 0.07,
+            MobKind::Mule => 0.07,
+            MobKind::Rabbit => 0.09,
+            MobKind::Fox => 0.1,
+            MobKind::Turtle => 0.03,
+            MobKind::Cod => 0.06,
+            MobKind::Salmon => 0.06,
+            MobKind::TropicalFish => 0.06,
+            MobKind::Pufferfish => 0.05,
+            MobKind::Squid => 0.04,
+            MobKind::GlowSquid => 0.04,
+            MobKind::Dolphin => 0.12,
+            MobKind::Goat => 0.08,
+            MobKind::Frog => 0.06,
+            MobKind::Tadpole => 0.05,
+            MobKind::Axolotl => 0.07,
+            MobKind::PolarBear => 0.08,
+            MobKind::Llama => 0.06,
+            MobKind::Panda => 0.05,
+            MobKind::Parrot => 0.08,
+            MobKind::Ravager => 0.1,
+            MobKind::Evoker => 0.1,
+            MobKind::Vex => 0.15,
+
             MobKind::Enderman => 0.1,
             MobKind::Pillager | MobKind::Vindicator => 0.12,
             MobKind::Wolf | MobKind::Cat | MobKind::Ocelot => 0.1,
@@ -255,7 +576,7 @@ impl MobKind {
     }
 
     pub fn undead(self) -> bool {
-        matches!(self, MobKind::Zombie | MobKind::Skeleton | MobKind::ZombifiedPiglin | MobKind::WitherSkeleton)
+        self.zombie_like() || self.skeleton_like() || matches!(self, MobKind::ZombifiedPiglin | MobKind::WitherSkeleton | MobKind::Phantom)
     }
 
     pub fn fire_immune(self) -> bool {
@@ -267,7 +588,7 @@ impl MobKind {
 
     /// No gravity.
     fn flies(self) -> bool {
-        matches!(self, MobKind::Blaze | MobKind::Ghast | MobKind::EnderDragon | MobKind::EndCrystal | MobKind::Bee)
+        matches!(self, MobKind::Blaze | MobKind::Ghast | MobKind::EnderDragon | MobKind::EndCrystal | MobKind::Bee | MobKind::Phantom | MobKind::Parrot | MobKind::Vex)
     }
 
     /// Living entity (the End crystal isn't one: its metadata is different).
@@ -282,7 +603,10 @@ impl MobKind {
     fn ambient(self) -> Option<String> {
         match self {
             // (The bee's buzz is a sound the client plays on its own.)
-            MobKind::Creeper | MobKind::MagmaCube | MobKind::EndCrystal | MobKind::Bee => None,
+            MobKind::Creeper | MobKind::MagmaCube | MobKind::Slime | MobKind::EndCrystal | MobKind::Bee | MobKind::IronGolem | MobKind::Tadpole => None,
+            k if k.fish() => None,
+            MobKind::Turtle => Some("entity.turtle.ambient_land".into()),
+            MobKind::Axolotl => Some("entity.axolotl.idle_air".into()),
             k => Some(format!("entity.{}.ambient", k.name())),
         }
     }
@@ -290,7 +614,12 @@ impl MobKind {
     /// Base melee damage.
     fn melee(self) -> f32 {
         match self {
-            MobKind::Zombie => 3.0,
+            MobKind::Zombie | MobKind::Husk | MobKind::Drowned | MobKind::ZombieVillager => 3.0,
+            MobKind::Phantom | MobKind::PolarBear | MobKind::Panda => 6.0,
+            MobKind::Dolphin => 3.0,
+            MobKind::IronGolem => 15.0,
+            MobKind::Ravager => 12.0,
+            MobKind::Vex => 9.0,
             MobKind::Wolf => 4.0,
             // Iron axe.
             MobKind::Vindicator => 8.0,
@@ -382,6 +711,50 @@ pub struct Mob {
     pub stung: u32,
     /// Ticks left of the bell's effect: glows during the last `BELL_GLOW / 2`.
     pub glowing: u32,
+    /// Conversions: a zombie under water turning into a drowned (counts up), a zombie
+    /// villager being cured (counts down).
+    pub convert: u32,
+    /// Ticks of Weakness (from a splash potion; needed to cure a zombie villager).
+    pub weak: u32,
+    /// Witch: ticks left drinking, and what.
+    pub drink: u32,
+    pub drinking: Option<&'static str>,
+    /// Witch: ticks of fire resistance left.
+    pub resist: u32,
+    /// Drowned holding a trident.
+    pub trident: bool,
+    /// Looks: rabbit, fox, frog, axolotl, parrot, llama, tropical fish, horse (colour and
+    /// markings), panda (genes); goats: 1 = screaming.
+    pub variant: i32,
+    /// Breath of water animals (out of the water it runs out).
+    pub air: i32,
+    /// Iron golem built by a player.
+    pub built: bool,
+    /// Horses and llamas: saddle, armor (or carpet), chest, trust, who rides it, llama
+    /// strength, and speed and jump strength.
+    pub saddle: bool,
+    pub armor: Option<ItemStack>,
+    pub chest: Option<Vec<crate::item::Slot>>,
+    pub temper: i32,
+    pub rider: Option<i32>,
+    pub strength: i32,
+    pub speed_attr: f64,
+    pub jump_attr: f64,
+    /// Turtle's beach; turtle or frog about to lay eggs.
+    pub home: Option<BlockPos>,
+    pub egg: bool,
+    /// Pufferfish puffed up (ticks); frog's tongue on its prey; polar bear standing up,
+    /// axolotl playing dead (ticks); state flags (fox, panda).
+    pub puff: u32,
+    pub tongue: Option<i32>,
+    pub stand: u32,
+    pub flags: u32,
+    /// Raid it belongs to (0: none).
+    pub raid: u32,
+    /// Evoker: spell being cast. Vex: who summoned it and ticks it has left.
+    pub spell: u8,
+    pub summoner: Option<i32>,
+    pub life: u32,
     pub explore: u32,
     pub anchor: Option<[f64; 3]>,
     pub approach: f64,
@@ -410,7 +783,7 @@ impl Mob {
         if self.grow < 0 {
             return (w * 0.5, h * 0.5);
         }
-        if self.kind == MobKind::MagmaCube {
+        if self.kind.cube() {
             (w * self.size as f64 * 2.0 * 0.5 + 0.0, h * self.size as f64 * 2.0 * 0.5)
         } else {
             (w, h)
@@ -419,7 +792,7 @@ impl Mob {
 
     pub fn max_health(&self) -> f32 {
         match self.kind {
-            MobKind::MagmaCube => (self.size * self.size) as f32,
+            MobKind::MagmaCube | MobKind::Slime => (self.size * self.size) as f32,
             MobKind::Wolf if self.owner.is_some() => 20.0,
             k => k.base_health(),
         }
@@ -433,6 +806,16 @@ impl Mob {
     /// Drawing the bow or loading the crossbow (arm raised).
     fn charging(&self) -> bool {
         self.drawing > 0 && (self.kind != MobKind::Pillager || self.drawing < 25)
+    }
+
+    /// Breath: water animals run out of it on land (axolotls dry out slowly, dolphins need to
+    /// surface now and then).
+    pub fn max_air(&self) -> i32 {
+        match self.kind {
+            MobKind::Axolotl => 6000,
+            MobKind::Dolphin => 4800,
+            _ => 300,
+        }
     }
 
     pub fn center(&self) -> [f64; 3] {
@@ -464,7 +847,13 @@ fn spawn_packets(m: &Mob) -> Vec<Vec<u8>> {
     p.i16(0).i16(0).i16(0);
     let mut out = vec![p, metadata(m)];
     match m.kind {
-        MobKind::Skeleton => out.push(equipment(m.eid, 0, "bow")),
+        MobKind::Skeleton | MobKind::Stray => out.push(equipment(m.eid, 0, "bow")),
+        MobKind::Drowned if m.trident => out.push(equipment(m.eid, 0, "trident")),
+        MobKind::Witch => {
+            if let Some(p) = m.drinking {
+                out.push(equipment_stack(m.eid, 0, super::effects::potion_item("potion", p)));
+            }
+        }
         MobKind::WitherSkeleton => out.push(equipment(m.eid, 0, "stone_sword")),
         MobKind::Piglin | MobKind::ZombifiedPiglin => out.push(equipment(m.eid, 0, "golden_sword")),
         MobKind::Vindicator => out.push(equipment(m.eid, 0, "iron_axe")),
@@ -475,6 +864,9 @@ fn spawn_packets(m: &Mob) -> Vec<Vec<u8>> {
             }
         }
         _ => {}
+    }
+    if super::horses::is_horse(m.kind) {
+        super::horses::spawn_extras(m, &mut out);
     }
     if m.admire > 0 {
         out.push(equipment(m.eid, 1, "gold_ingot"));
@@ -505,7 +897,17 @@ pub fn metadata(m: &Mob) -> Vec<u8> {
             p.u8(16).varint(8).bool(m.grow < 0);
         }
     }
+    // 16: raiders cheering after a raid.
+    if super::raids::is_raider(m.kind) {
+        p.u8(16).varint(8).bool(m.flags & super::raids::CELEBRATING != 0);
+    }
     match m.kind {
+        MobKind::Evoker => {
+            p.u8(17).varint(0).i8(m.spell as i8);
+        }
+        MobKind::Vex => {
+            p.u8(16).varint(0).i8(i8::from(m.charging));
+        }
         MobKind::Creeper => {
             p.u8(16).varint(1).varint(if m.fuse.is_some() { 1 } else { -1 });
             // 17: charged.
@@ -525,8 +927,80 @@ pub fn metadata(m: &Mob) -> Vec<u8> {
         MobKind::Ghast => {
             p.u8(16).varint(8).bool(m.charging);
         }
-        MobKind::MagmaCube => {
+        MobKind::MagmaCube | MobKind::Slime => {
             p.u8(16).varint(1).varint(m.size);
+        }
+        MobKind::Zombie | MobKind::Husk | MobKind::Drowned => {
+            // 18: shaking before turning into a drowned.
+            p.u8(18).varint(8).bool(m.convert >= super::monsters::SHAKE);
+        }
+        MobKind::ZombieVillager => {
+            // 19: being cured; 20: villager data (type, profession, level).
+            p.u8(19).varint(8).bool(m.convert > 0);
+            let (t, prof, lvl) = m.villager.as_ref().map_or((0, 0, 1), |v| (v.vtype, super::villagers::profession_id(&v.profession), v.level));
+            p.u8(20).varint(18).varint(t).varint(prof).varint(lvl);
+        }
+        MobKind::Witch => {
+            // 17: drinking a potion.
+            p.u8(17).varint(8).bool(m.drink > 0);
+        }
+        MobKind::Phantom => {
+            p.u8(16).varint(1).varint(0);
+        }
+        MobKind::IronGolem => {
+            p.u8(16).varint(0).i8(i8::from(m.built));
+        }
+        k if super::horses::is_horse(k) => super::horses::metadata(m, &mut p),
+        MobKind::Rabbit => {
+            p.u8(17).varint(1).varint(m.variant);
+        }
+        MobKind::Fox => {
+            p.u8(17).varint(1).varint(m.variant);
+            p.u8(18).varint(0).i8(m.flags as i8);
+        }
+        MobKind::Turtle => {
+            p.u8(18).varint(8).bool(m.egg);
+        }
+        MobKind::TropicalFish => {
+            p.u8(17).varint(1).varint(m.variant);
+        }
+        MobKind::Pufferfish => {
+            p.u8(17).varint(1).varint(super::wildlife::puff_state(m) as i32);
+        }
+        MobKind::Goat => {
+            p.u8(17).varint(8).bool(m.variant == 1);
+            p.u8(18).varint(8).bool(true);
+            p.u8(19).varint(8).bool(true);
+        }
+        MobKind::Frog => {
+            // 17: variant (frog_variant registry); 18: tongue target (optional varint, id + 1).
+            p.u8(17).varint(22).varint(m.variant);
+            p.u8(18).varint(19).varint(m.tongue.map_or(0, |t| t + 1));
+        }
+        MobKind::Axolotl => {
+            p.u8(17).varint(1).varint(m.variant);
+            p.u8(18).varint(8).bool(m.stand > 0);
+        }
+        MobKind::PolarBear => {
+            p.u8(17).varint(8).bool(m.stand > 0);
+        }
+        MobKind::Panda => {
+            p.u8(20).varint(0).i8((m.variant & 0xff) as i8);
+            p.u8(21).varint(0).i8((m.variant >> 8 & 0xff) as i8);
+            p.u8(22).varint(0).i8(m.flags as i8);
+        }
+        MobKind::Parrot => {
+            p.u8(17).varint(0).i8(if m.sitting { 0x01 } else { 0 } | if m.owner.is_some() { 0x04 } else { 0 });
+            p.u8(18).varint(13);
+            match m.owner {
+                Some(u) => {
+                    p.bool(true).uuid(u);
+                }
+                None => {
+                    p.bool(false);
+                }
+            }
+            p.u8(19).varint(1).varint(m.variant);
         }
         MobKind::Enderman => {
             p.u8(17).varint(8).bool(m.angry > 0);
@@ -668,6 +1142,33 @@ pub fn spawn(server: &Server, dim: Dimension, kind: MobKind, pos: [f64; 3]) -> i
         pollinate: 0,
         stung: 0,
         glowing: 0,
+        convert: 0,
+        weak: 0,
+        drink: 0,
+        drinking: None,
+        resist: 0,
+        trident: false,
+        variant: 0,
+        air: 300,
+        built: false,
+        saddle: false,
+        armor: None,
+        chest: None,
+        temper: 0,
+        rider: None,
+        strength: 0,
+        speed_attr: 0.0,
+        jump_attr: 0.0,
+        home: None,
+        egg: false,
+        puff: 0,
+        tongue: None,
+        stand: 0,
+        flags: 0,
+        raid: 0,
+        spell: 0,
+        summoner: None,
+        life: 0,
         explore: 0,
         anchor: None,
         approach: 0.0,
@@ -684,11 +1185,25 @@ pub fn spawn(server: &Server, dim: Dimension, kind: MobKind, pos: [f64; 3]) -> i
         shore: None,
     };
     match kind {
-        MobKind::MagmaCube => {
+        MobKind::MagmaCube | MobKind::Slime => {
             m.size = [1, 2, 4][(r() * 3.0) as usize % 3];
             m.health = m.max_health();
         }
-        MobKind::Villager => m.villager = Some(Box::new(super::villagers::VillagerData::random())),
+        MobKind::Villager | MobKind::ZombieVillager => m.villager = Some(Box::new(super::villagers::VillagerData::random())),
+        MobKind::Drowned => m.trident = r() < 0.15,
+        k if super::horses::is_horse(k) => super::horses::init(&mut m),
+        MobKind::TropicalFish => {
+            // Size, pattern, body and pattern colours.
+            m.variant = (r() * 2.0) as i32 | ((r() * 6.0) as i32) << 8 | ((r() * 16.0) as i32) << 16 | ((r() * 16.0) as i32) << 24;
+        }
+        MobKind::Axolotl => m.variant = if r() < 1.0 / 1200.0 { 4 } else { (r() * 4.0) as i32 },
+        MobKind::Parrot => m.variant = (r() * 5.0) as i32,
+        MobKind::Goat => m.variant = i32::from(r() < 0.02),
+        MobKind::Panda => {
+            let gene = || [0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6][(r() * 11.0) as usize % 11];
+            m.variant = gene() | gene() << 8;
+        }
+        MobKind::Tadpole => m.grow = super::animals::BABY,
         MobKind::EnderDragon => {
             m.dragon = Some(Box::default());
             // The client numbers the dragon's 8 parts with the following ids.
@@ -699,6 +1214,7 @@ pub fn spawn(server: &Server, dim: Dimension, kind: MobKind, pos: [f64; 3]) -> i
         MobKind::EndCrystal => m.yaw = 0.0,
         _ => {}
     }
+    m.air = m.max_air();
     let eid = m.eid;
     server.mobs.lock().unwrap().insert(eid, m);
     eid
@@ -739,6 +1255,31 @@ struct SavedMob {
     owner: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     sitting: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    trident: bool,
+    /// Zombie villager being cured (ticks left).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    convert: u32,
+    #[serde(default, skip_serializing_if = "is_zero_i32")]
+    variant: i32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    built: bool,
+    /// Horses and llamas.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    horse: Option<SavedHorse>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    home: Option<[i32; 3]>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SavedHorse {
+    saddle: bool,
+    armor: Option<String>,
+    chest: Option<Vec<crate::world::blockentity::SavedSlot>>,
+    temper: i32,
+    strength: i32,
+    speed: f64,
+    jump: f64,
 }
 
 fn is_zero_i32(v: &i32) -> bool {
@@ -760,7 +1301,7 @@ pub fn save(server: &Server) {
         .lock()
         .unwrap()
         .values()
-        .filter(|m| m.death_ticks.is_none())
+        .filter(|m| m.death_ticks.is_none() && m.kind != MobKind::Vex)
         .map(|m| SavedMob {
             kind: m.kind.name().into(),
             dim: Some(m.dim.name().into()),
@@ -768,13 +1309,32 @@ pub fn save(server: &Server) {
             yaw: m.yaw,
             health: m.health,
             sheared: m.sheared,
-            size: (m.kind == MobKind::MagmaCube).then_some(m.size),
+            size: m.kind.cube().then_some(m.size),
             villager: m.villager.as_ref().map(|v| v.save()),
             patrol: m.patrol,
             captain: m.captain,
             grow: m.grow,
             owner: m.owner.map(|u| format!("{u:032x}")),
             sitting: m.sitting,
+            trident: m.trident,
+            convert: if m.kind == MobKind::ZombieVillager { m.convert } else { 0 },
+            variant: m.variant,
+            built: m.built,
+            horse: super::horses::is_horse(m.kind).then(|| SavedHorse {
+                saddle: m.saddle,
+                armor: m.armor.as_ref().map(|a| a.name().to_string()),
+                chest: m.chest.as_ref().map(|c| {
+                    c.iter()
+                        .enumerate()
+                        .filter_map(|(i, s)| s.as_ref().map(|it| crate::world::blockentity::SavedSlot { slot: i, item: it.name().to_string(), count: it.count, nbt: None }))
+                        .collect()
+                }),
+                temper: m.temper,
+                strength: m.strength,
+                speed: m.speed_attr,
+                jump: m.jump_attr,
+            }),
+            home: m.home.map(|h| [h.x, h.y, h.z]),
         })
         .collect();
     let path = mobs_file(server);
@@ -807,6 +1367,23 @@ pub fn load(server: &Server) {
             m.grow = s.grow;
             m.owner = s.owner.as_deref().and_then(|u| u128::from_str_radix(u, 16).ok());
             m.sitting = s.sitting;
+            m.trident = s.trident;
+            m.convert = s.convert;
+            if s.variant != 0 {
+                m.variant = s.variant;
+            }
+            m.built = s.built;
+            m.home = s.home.map(|h| BlockPos::new(h[0], h[1], h[2]));
+            if let Some(h) = s.horse {
+                m.saddle = h.saddle;
+                m.armor = h.armor.and_then(|a| data::get().item_id(&a)).map(|i| ItemStack::new(i, 1));
+                let slots = if m.kind == MobKind::Llama { 3 * h.strength.clamp(1, 5) as usize } else { 15 };
+                m.chest = h.chest.map(|c| crate::world::blockentity::load_slots(&c, slots));
+                m.temper = h.temper;
+                m.strength = h.strength;
+                m.speed_attr = h.speed;
+                m.jump_attr = h.jump;
+            }
             if m.owner.is_some() {
                 m.health = s.health.clamp(0.5, m.max_health());
             }
@@ -839,6 +1416,9 @@ pub struct Seen {
     pub hands: [&'static str; 2],
     /// Alive and not a spectator (creative players count: animals follow them).
     pub present: bool,
+    pub on_ground: bool,
+    /// Carries a parrot on the shoulder.
+    pub shoulder: bool,
 }
 
 /// Effects applied outside the mobs/world locks.
@@ -855,12 +1435,35 @@ pub enum Action {
     Xp(Dimension, [f64; 3], i32),
     /// Two animals have a baby: (dimension, kind, where, parents, player who fed them, owner).
     Breed(Dimension, MobKind, [f64; 3], (i32, i32), Option<i32>, Option<u128>),
-    /// A mob bites another mob: (target, damage, attacker).
-    HurtMob(i32, f32, i32),
+    /// A mob bites another mob: (target, damage, attacker, knockback).
+    HurtMob(i32, f32, i32, Option<[f64; 3]>),
+    /// A block placed by a mob (turtle eggs, frogspawn), as `name[prop=value]`.
+    PlaceBlock(Dimension, BlockPos, String),
+    /// A frog swallows a mob, which leaves an item behind.
+    Eaten(i32, Dimension, [f64; 3], String),
+    /// An item dropped by a mob (a panda's sneeze, a turtle's scute).
+    Drop(Dimension, [f64; 3], String),
+    /// A parrot jumps onto its owner's shoulder.
+    Shoulder(Arc<Player>, i32),
+    /// A horse trusts its rider at last / throws its rider off.
+    Tame(i32, i32),
+    Buck(i32, i32),
+    /// The rider of a mob goes where it goes.
+    Ride(i32, [f64; 3]),
+    /// Evoker fangs: (dimension, evoker, [(where, delay)]).
+    Fangs(Dimension, i32, Vec<([f64; 3], i32)>),
+    /// An evoker summons vexes: (dimension, evoker, where, target player).
+    SummonVexes(Dimension, i32, [f64; 3], i32),
+    /// A block broken by a mob (a ravager trampling leaves): (dimension, where, old state).
+    Break(Dimension, BlockPos, u16),
     /// A packet for everyone in a dimension (door cracks, level events...).
     DimPacket(Dimension, Vec<u8>),
     /// A bee goes into its hive: (bee, dimension, hive, with nectar).
     EnterHive(i32, Dimension, BlockPos, bool),
+    /// A mob turns into another kind (zombie into drowned, zombie villager cured...).
+    Convert(i32, MobKind),
+    /// A mob shoots a special arrow (strays: slowness).
+    ShootArrow(Dimension, i32, [f64; 3], [f64; 3], Option<ItemStack>),
 }
 
 pub fn difficulty_damage(server: &Server, base: f32) -> f32 {
@@ -878,7 +1481,7 @@ fn is_day(server: &Server) -> bool {
 }
 
 /// Does it see the sky? (nothing blocking light above).
-fn sky_exposed(world: &mut World, p: [f64; 3]) -> bool {
+pub(super) fn sky_exposed(world: &mut World, p: [f64; 3]) -> bool {
     let reg = data::get();
     let (x, z) = (p[0].floor() as i32, p[2].floor() as i32);
     (p[1].floor() as i32 + 1..320).all(|y| reg.light(world.get_block(BlockPos::new(x, y, z))).0 == 0)
@@ -924,6 +1527,8 @@ fn seen_players(server: &Server) -> Vec<Seen> {
                 shield_up,
                 hands,
                 present: !s.dead && s.game_mode != 3,
+                on_ground: s.on_ground,
+                shoulder: s.shoulder.is_some(),
             };
             drop(s);
             seen
@@ -944,6 +1549,11 @@ pub fn tick(server: &Arc<Server>, age: i64) {
     }
     if age % 20 == 10 {
         super::bees::tick_hives(server, is_day(server));
+    }
+    super::raids::tick(server, &seen, age);
+    super::raids::tick_fangs(server);
+    if age % 1200 == 300 {
+        super::monsters::spawn_phantoms(server, &seen, !is_day(server) || server.weather.lock().unwrap().is_thundering());
     }
     if age % 20 == 0 {
         super::doors::decay(server, age);
@@ -992,14 +1602,17 @@ pub fn tick(server: &Arc<Server>, age: i64) {
                 }
                 let nearest = seen.iter().map(|s| dist2(&s.pos, &m.pos)).fold(f64::MAX, f64::min);
                 // Despawn: monsters far from everyone (or on peaceful).
-                if m.kind.hostile() && (peaceful || nearest > 128.0 * 128.0 || (nearest > 32.0 * 32.0 && entities::random() < 1.0 / 800.0)) {
+                if (m.kind.hostile() || m.kind.water_ambient()) && (peaceful && m.kind.hostile() || (m.raid == 0 && (nearest > 128.0 * 128.0 || (nearest > 32.0 * 32.0 && entities::random() < 1.0 / 800.0)))) {
                     remove.push(m.eid);
                     continue;
                 }
                 if nearest > 160.0 * 160.0 && m.kind != MobKind::EnderDragon {
                     continue; // too far: frozen
                 }
-                let look = |m: &Mob| (m.target.is_some(), m.fire > 0, m.fuse.is_some(), m.angry > 0, m.burst > 0, m.charging, m.dragon.as_ref().map(|d| d.phase), m.charging(), m.nectar, m.stung > 0, glows(m));
+                let look = |m: &Mob| {
+                    let converting = m.convert >= super::monsters::SHAKE || (m.kind == MobKind::ZombieVillager && m.convert > 0);
+                    (m.target.is_some(), m.fire > 0, m.fuse.is_some(), m.angry > 0, m.burst > 0, m.charging, m.dragon.as_ref().map(|d| d.phase), m.charging(), m.nectar, m.stung > 0, glows(m), (m.drink > 0, converting, super::wildlife::look(m), m.egg))
+                };
                 let before = look(m);
                 m.glowing = m.glowing.saturating_sub(1);
                 let health_before = m.health;
@@ -1007,7 +1620,12 @@ pub fn tick(server: &Arc<Server>, age: i64) {
                     super::dragon::ai(server, &mut world, m, &seen, &crystals, &mut actions);
                 } else {
                     ai(server, &mut world, m, &seen, &groups, &others, day, &mut actions);
-                    physics(&mut world, m, &mut actions);
+                    if !super::horses::controlled(m) {
+                        physics(&mut world, m, &mut actions);
+                        if let Some(r) = m.rider {
+                            actions.push(Action::Ride(r, [m.pos[0], m.pos[1] + super::horses::seat(m), m.pos[2]]));
+                        }
+                    }
                 }
                 // Arms raised, on fire, about to explode...: new metadata.
                 if look(m) != before || (m.kind == MobKind::EnderDragon && m.health != health_before) {
@@ -1064,13 +1682,95 @@ pub fn run_actions(server: &Arc<Server>, actions: Vec<Action>) {
                 health::damage(server, &p, amount, kind, Some(by));
             }
             Action::Breed(dim, kind, at, parents, by, owner) => super::animals::breed(server, dim, kind, at, parents, by, owner),
-            Action::HurtMob(target, amount, by) => hurt(server, target, amount, "mob_attack", Some(by), None, 0),
+            Action::HurtMob(target, amount, by, knock) => hurt(server, target, amount, "mob_attack", Some(by), knock, 0),
+            Action::PlaceBlock(dim, at, spec) => {
+                if let Ok(state) = super::commands::parse_state(&spec) {
+                    let placed = {
+                        let mut world = server.world(dim).lock().unwrap();
+                        data::get().is_air(world.get_block(at)) && {
+                            world.set_block(at, state);
+                            true
+                        }
+                    };
+                    if placed {
+                        server.broadcast_dim(dim, &super::blocks::block_change(at, state), None);
+                    }
+                }
+            }
+            Action::Eaten(eid, dim, at, item) => {
+                if server.mobs.lock().unwrap().remove(&eid).is_some() {
+                    if let Some(i) = data::get().item_id(&item) {
+                        entities::spawn(server, dim, at, [0.0, 0.1, 0.0], ItemStack::new(i, 1), 10);
+                    }
+                    sound::entity(server, eid, "entity.frog.eat", sound::NEUTRAL, 1.0, 1.0);
+                }
+            }
+            Action::Drop(dim, at, item) => {
+                if let Some(i) = data::get().item_id(&item) {
+                    entities::spawn(server, dim, at, [0.0, 0.2, 0.0], ItemStack::new(i, 1), 10);
+                }
+            }
+            Action::Shoulder(player, eid) => super::pets::perch(server, &player, eid),
+            Action::Tame(eid, rider) => {
+                let owner = server.players.read().unwrap().get(&rider).cloned();
+                if let Some(p) = owner {
+                    let meta = {
+                        let mut map = server.mobs.lock().unwrap();
+                        map.get_mut(&eid).map(|m| {
+                            m.owner = Some(p.uuid);
+                            m.temper = 100;
+                            metadata(m)
+                        })
+                    };
+                    if let Some(meta) = meta {
+                        server.broadcast_tracked(eid, &meta, true);
+                        server.broadcast_tracked(eid, &super::animals::status(eid, 7), true);
+                        super::advancements::grant(server, &p, "husbandry/tame_an_animal");
+                    }
+                }
+            }
+            Action::Buck(eid, rider) => {
+                if let Some(p) = server.players.read().unwrap().get(&rider).cloned() {
+                    super::horses::unmount(server, &p, eid, true);
+                }
+            }
+            Action::Fangs(dim, owner, list) => super::raids::spawn_fangs(server, dim, owner, list),
+            Action::SummonVexes(dim, owner, at, target) => super::raids::summon_vexes(server, dim, owner, at, target),
+            Action::Break(dim, at, old) => {
+                let broke = {
+                    let mut world = server.world(dim).lock().unwrap();
+                    world.get_block(at) == old && {
+                        world.set_block(at, 0);
+                        true
+                    }
+                };
+                if broke {
+                    server.broadcast_dim(dim, &super::blocks::block_change(at, 0), None);
+                    let mut ev = packet(id::play::WORLD_EVENT);
+                    ev.i32(2001).position(at).i32(old as i32).bool(false);
+                    server.broadcast_dim(dim, &ev, None);
+                }
+            }
+            Action::Ride(rider, pos) => {
+                if let Some(p) = server.players.read().unwrap().get(&rider).cloned() {
+                    super::horses::follow(&p, pos, 0.0);
+                }
+            }
             Action::DimPacket(dim, p) => server.broadcast_dim(dim, &p, None),
             Action::EnterHive(eid, dim, hive, nectar) => {
                 remove(server, eid);
                 super::bees::enter(server, dim, hive, nectar);
             }
             Action::Explode(dim, pos, power, by, fire) => explosion::explode_ex(server, dim, pos, power, Some(by), fire),
+            Action::Convert(eid, to) => convert(server, eid, to),
+            Action::ShootArrow(dim, shooter, from, vel, item) => {
+                let mut data = item.map(super::projectiles::ArrowData::new);
+                if let Some(d) = &mut data {
+                    d.pickup = 0;
+                }
+                super::projectiles::shoot_with(server, dim, ProjectileKind::Arrow, shooter, from, vel, data);
+                sound::entity(server, shooter, "entity.stray.shoot", sound::HOSTILE, 1.0, 1.0);
+            }
             Action::Shoot(dim, kind, shooter, from, vel) => {
                 let crossbow = kind == ProjectileKind::Arrow && kind_of(server, shooter) == Some(MobKind::Pillager);
                 let snd = match kind {
@@ -1078,6 +1778,8 @@ pub fn run_actions(server: &Arc<Server>, actions: Vec<Action>) {
                     ProjectileKind::Arrow => "entity.skeleton.shoot",
                     ProjectileKind::SmallFireball => "entity.blaze.shoot",
                     ProjectileKind::Fireball => "entity.ghast.shoot",
+                    ProjectileKind::Potion(_) => "entity.witch.throw",
+                    ProjectileKind::Trident => "entity.drowned.shoot",
                     _ => "entity.ender_dragon.shoot",
                 };
                 super::projectiles::shoot(server, dim, kind, shooter, from, vel);
@@ -1144,7 +1846,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         m.fire = 0;
     }
     // Zombies and skeletons burn in sunlight (not while it rains on them).
-    if matches!(kind, MobKind::Zombie | MobKind::Skeleton) && day && m.dim == Dimension::Overworld && m.age % 20 == 0 {
+    if kind.burns_in_sun() && day && m.dim == Dimension::Overworld && m.age % 20 == 0 {
         if sky_exposed(world, m.pos) && !in_water(world, m.pos) && !super::weather::rain_at(server, world, m.dim, m.pos) {
             if m.fire == 0 {
                 m.fire = 1;
@@ -1173,9 +1875,24 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
             m.health -= 1.0;
             m.hurt_time = 10;
         }
-        if (!day || !matches!(kind, MobKind::Zombie | MobKind::Skeleton)) && m.fire > 160 {
+        if (!day || !kind.burns_in_sun()) && m.fire > 160 {
             m.fire = 0;
         }
+    }
+    super::monsters::tick(world, m, actions);
+    if super::horses::is_horse(kind) {
+        super::horses::ridden_tick(m, actions);
+        if super::horses::controlled(m) {
+            return;
+        }
+    }
+    if kind == MobKind::Phantom {
+        super::monsters::phantom(world, m, seen, others, actions, server);
+        return;
+    }
+    if kind == MobKind::Vex {
+        super::raids::vex(server, m, seen, actions);
+        return;
     }
     // Water damages blazes and scares endermen away.
     if kind == MobKind::Blaze && in_water(world, m.pos) && m.age % 10 == 0 {
@@ -1241,7 +1958,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         let range = match kind {
             MobKind::Ghast => 64.0,
             MobKind::Blaze => 48.0,
-            MobKind::Zombie => 32.0,
+            k if k.zombie_like() => 32.0,
             _ => 16.0,
         };
         let follow = f64::max(range * 1.25, 32.0);
@@ -1317,7 +2034,32 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         face(m, t.pos);
         let reach = 1.6 + m.size().0 / 2.0;
         match kind {
-            MobKind::Zombie | MobKind::Spider | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::WitherSkeleton | MobKind::Hoglin | MobKind::Enderman | MobKind::Endermite | MobKind::Wolf | MobKind::Silverfish | MobKind::CaveSpider | MobKind::Vindicator => {
+            MobKind::IronGolem => {
+                goal = super::golems::strike_player(server, m, t, d, actions);
+            }
+            MobKind::Llama => {
+                // Spits from where it stands.
+                if d < 12.0 && m.attack_cooldown == 0 {
+                    m.attack_cooldown = 40;
+                    let from = [m.pos[0], m.pos[1] + 1.5, m.pos[2]];
+                    let dir = normalize([t.pos[0] - from[0], t.pos[1] + 1.0 - from[1], t.pos[2] - from[2]]);
+                    actions.push(Action::Shoot(m.dim, ProjectileKind::LlamaSpit, m.eid, from, [dir[0] * 1.5, dir[1] * 1.5 + 0.05, dir[2] * 1.5]));
+                }
+                goal = Some((m.pos, 0.0));
+            }
+            k if k.zombie_like() || matches!(k, MobKind::Spider | MobKind::ZombifiedPiglin | MobKind::Piglin | MobKind::WitherSkeleton | MobKind::Hoglin | MobKind::Enderman | MobKind::Endermite | MobKind::Wolf | MobKind::Silverfish | MobKind::CaveSpider | MobKind::Vindicator | MobKind::PolarBear | MobKind::Panda | MobKind::Dolphin | MobKind::Ravager) => {
+                if kind == MobKind::PolarBear && d < 4.0 {
+                    m.stand = 20;
+                }
+                // A ravager's head-butt sends you flying.
+                if kind == MobKind::Ravager && d < reach && dy < 2.5 && m.attack_cooldown == 0 {
+                    let dir = normalize([t.pos[0] - m.pos[0], 0.0, t.pos[2] - m.pos[2]]);
+                    actions.push(Action::Knock(t.player.clone(), [dir[0] * 1.2, 0.5, dir[2] * 1.2]));
+                }
+                // A drowned with a trident throws it from afar.
+                if kind == MobKind::Drowned && m.trident && d > 4.0 && d < 20.0 {
+                    super::monsters::throw_trident(world, m, t, actions);
+                }
                 let speed = if kind == MobKind::Enderman { 0.15 } else { kind.speed() * 1.25 };
                 goal = Some((t.pos, speed));
                 if d < reach && dy < 2.5 && m.attack_cooldown == 0 {
@@ -1330,6 +2072,10 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
                     actions.push(Action::Hurt(t.player.clone(), difficulty_damage(server, kind.melee()), "mob_attack", by.clone()));
                     if kind == MobKind::WitherSkeleton {
                         actions.push(Action::Effect(t.player.clone(), "wither", 0, 200));
+                    }
+                    // Husks leave you hungry (7 s per difficulty level).
+                    if kind == MobKind::Husk {
+                        actions.push(Action::Effect(t.player.clone(), "hunger", 0, 140 * server.config.difficulty.max(1) as i32));
                     }
                     // Cave spiders poison (7 s on normal, 15 s on hard).
                     if kind == MobKind::CaveSpider && server.config.difficulty >= 2 {
@@ -1345,7 +2091,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
                     actions.push(Action::Sound(m.eid, "entity.enderman.teleport".into(), sound::HOSTILE));
                 }
             }
-            MobKind::Skeleton => {
+            MobKind::Skeleton | MobKind::Stray => {
                 // Shoots only what it sees; otherwise (or too far) it walks to the player.
                 // In range it keeps its distance and circles around while drawing the bow.
                 // On hard it also backs off, flanks shields and takes cover from archers
@@ -1399,8 +2145,19 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
                         (dir[1] + horiz * 0.2) / len * speed,
                         dir[2] / len * speed + (entities::random() as f64 - 0.5) * spread,
                     ];
-                    actions.push(Action::Shoot(m.dim, ProjectileKind::Arrow, m.eid, from, vel));
+                    if kind == MobKind::Stray {
+                        // Its arrows slow you down for 30 s.
+                        actions.push(Action::ShootArrow(m.dim, m.eid, from, vel, super::effects::potion_item("tipped_arrow", "long_slowness")));
+                    } else {
+                        actions.push(Action::Shoot(m.dim, ProjectileKind::Arrow, m.eid, from, vel));
+                    }
                 }
+            }
+            MobKind::Witch => {
+                goal = super::monsters::witch_attack(server, world, m, t, d, actions);
+            }
+            MobKind::Evoker => {
+                goal = super::raids::evoker_attack(world, m, t, d, actions);
             }
             MobKind::Creeper => {
                 if d < 3.0 && m.fuse.is_none() {
@@ -1464,10 +2221,12 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
             MobKind::Pillager => {
                 goal = super::pillagers::combat(server, world, m, t, group, actions);
             }
-            MobKind::MagmaCube => {
-                if d < reach && dy < 2.0 && m.attack_cooldown == 0 {
+            MobKind::MagmaCube | MobKind::Slime => {
+                // Small slimes are harmless; big ones hit as hard as they are big.
+                let dmg = if kind == MobKind::Slime { if m.size > 1 { m.size as f32 } else { 0.0 } } else { (m.size + 2) as f32 };
+                if dmg > 0.0 && d < reach && dy < 2.0 && m.attack_cooldown == 0 {
                     m.attack_cooldown = 20;
-                    actions.push(Action::Hurt(t.player.clone(), difficulty_damage(server, (m.size + 2) as f32), "mob_attack", by));
+                    actions.push(Action::Hurt(t.player.clone(), difficulty_damage(server, dmg), "mob_attack", by));
                 }
             }
             _ => {}
@@ -1500,7 +2259,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
     // Walking towards a player: along an A* path, so they go around walls and up steps
     // instead of pushing in a straight line.
     if let (Some(t), Some((g, speed))) = (target, goal) {
-        if g == t.pos && !kind.flies() {
+        if g == t.pos && !kind.flies() && !(kind.swims() && in_water(world, m.pos)) {
             goal = Some((follow_path(world, m, t.pos), speed));
         }
     }
@@ -1508,7 +2267,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
     // Undead that burn: shortly before sunrise and during the day they go for the shade (under
     // trees, roofs, caves) and do not leave it; from there they still attack whoever comes close
     // and skeletons keep shooting.
-    if matches!(kind, MobKind::Zombie | MobKind::Skeleton) && m.dim == Dimension::Overworld && sun_soon(server) && !in_water(world, m.pos) {
+    if kind.burns_in_sun() && !kind.flies() && kind != MobKind::Drowned && m.dim == Dimension::Overworld && sun_soon(server) && !in_water(world, m.pos) {
         if m.age % 10 == 0 || m.shade.is_some() {
             m.exposed = sky_exposed(world, m.pos);
         }
@@ -1540,8 +2299,8 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         m.shade = None;
     }
 
-    // Magma cube: moves by hopping.
-    if kind == MobKind::MagmaCube {
+    // Magma cubes and slimes move by hopping.
+    if kind.cube() {
         if m.on_ground && m.attack_cooldown % 4 == 0 {
             let jump_delay = if target.is_some() { 10 } else { 30 };
             if m.age % jump_delay == 0 {
@@ -1622,9 +2381,17 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         }
     }
 
+    // Golems guard against monsters; monsters fight back at mobs that hit them.
+    if kind == MobKind::IronGolem && target.is_none() {
+        goal = super::golems::guard(world, m, others, actions);
+    }
+    if target.is_none() && goal.is_none() && m.prey.is_some() && (kind.zombie_like() || matches!(kind, MobKind::Spider | MobKind::CaveSpider | MobKind::Vindicator | MobKind::Piglin | MobKind::ZombifiedPiglin | MobKind::WitherSkeleton | MobKind::Hoglin | MobKind::Enderman | MobKind::Silverfish | MobKind::Endermite)) {
+        goal = super::golems::fight_back(world, m, others, actions);
+    }
+
     // Skeletons run from wolves, and creepers from cats and ocelots, before anything else.
     let feared: &[MobKind] = match kind {
-        MobKind::Skeleton => &[MobKind::Wolf],
+        MobKind::Skeleton | MobKind::Stray => &[MobKind::Wolf],
         MobKind::Creeper => &[MobKind::Cat, MobKind::Ocelot],
         _ => &[],
     };
@@ -1643,15 +2410,29 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         }
     }
 
+    // Raiders go for the village and its villagers; villagers run from them.
+    if target.is_none() && goal.is_none() && m.raid != 0 && super::raids::is_raider(kind) {
+        goal = super::raids::raider_goal(world, m, others, actions);
+    }
+    if kind == MobKind::Villager && goal.is_none() {
+        if let Some(g) = super::raids::villager_flee(world, m, others) {
+            goal = Some(g);
+        }
+    }
     // Patrol on the move (or waiting in formation); the vindicator searches buildings.
-    if kind == MobKind::Pillager && target.is_none() {
+    if kind == MobKind::Pillager && target.is_none() && m.raid == 0 {
         goal = super::pillagers::patrol(world, m, group);
     }
-    if kind == MobKind::Vindicator && target.is_none() {
+    if kind == MobKind::Vindicator && target.is_none() && m.raid == 0 {
         goal = super::pillagers::vindicator(world, m, group);
     }
     // Animals: love, babies growing up, following food; tamed wolves.
-    if super::animals::breeds(kind) {
+    if super::wildlife::handles(kind) {
+        let g = super::wildlife::behave(server, world, m, seen, others, day, actions);
+        if goal.is_none() {
+            goal = g;
+        }
+    } else if super::animals::breeds(kind) {
         let g = super::animals::behave(world, m, seen, others, actions);
         if goal.is_none() {
             goal = g;
@@ -1659,7 +2440,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
     }
 
     // A land mob in the water swims to the nearest bank.
-    if goal.is_none() && !kind.flies() && !matches!(kind, MobKind::Strider | MobKind::Ghast) && in_water(world, m.pos) {
+    if goal.is_none() && !kind.flies() && !kind.swims() && !matches!(kind, MobKind::Strider | MobKind::Ghast) && in_water(world, m.pos) {
         if m.shore.is_none() || m.age % 40 == 0 {
             m.shore = find_shore(world, m);
         }
@@ -1673,7 +2454,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
     // Animals, villagers and monsters without a target: wander or flee. Monsters patrol (they
     // roam further and more often, along a path) until they find someone.
     if goal.is_none() {
-        let patrols = kind.hostile() && !kind.flies() && kind != MobKind::MagmaCube;
+        let patrols = kind.hostile() && !kind.flies() && !kind.cube();
         let speed = if m.panic > 0 { kind.speed() * 2.0 } else if patrols { kind.speed() * 0.8 } else { kind.speed() };
         let reached = m.wander.is_some_and(|w| (w[0] - m.pos[0]).powi(2) + (w[2] - m.pos[2]).powi(2) < 1.0);
         if reached || (m.panic > 0 && m.panic % 30 == 0) || (m.wander.is_some() && m.age % 400 == 0 && !m.searching) {
@@ -1697,8 +2478,8 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
                 let w = [x as f64 + 0.5, y as f64, z as f64 + 0.5];
                 let ground = data::get().block_of_state(world.get_block(BlockPos::new(x, y, z))).name.as_str();
                 // Undead roaming by day stay in the shade.
-                let sunny = matches!(kind, MobKind::Zombie | MobKind::Skeleton) && m.dim == Dimension::Overworld && sun_soon(server) && sky_exposed(world, w);
-                if !sunny && !matches!(ground, "water" | "lava") {
+                let sunny = kind.burns_in_sun() && m.dim == Dimension::Overworld && sun_soon(server) && sky_exposed(world, w);
+                if !sunny && !matches!(ground, "water" | "lava") || (kind.swims() && ground == "water") {
                     m.wander = Some(w);
                     break;
                 }
@@ -1719,7 +2500,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
     }
 
     // A zombie or a vindicator with a closed wooden door in its way breaks it.
-    if matches!(kind, MobKind::Zombie | MobKind::Vindicator) && goal.is_some() && server.rule("mobGriefing") {
+    if (kind.zombie_like() || kind == MobKind::Vindicator) && goal.is_some() && server.rule("mobGriefing") {
         if let Some(door) = super::doors::in_the_way(world, m) {
             let age = server.age.load(Ordering::Relaxed);
             super::doors::hit(server, world, m, door, age, actions);
@@ -1727,6 +2508,16 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
         }
     }
 
+    // A ravager tramples leaves and crops in its way.
+    if kind == MobKind::Ravager && goal.is_some() && m.age % 5 == 0 && server.rule("mobGriefing") {
+        super::raids::trample(world, m, actions);
+    }
+    // Swimmers go up and down towards where they are heading.
+    if kind.swims() && in_water(world, m.pos) {
+        if let Some((g, _)) = goal {
+            m.vel[1] = ((g[1] + 0.2 - m.pos[1]) * 0.1).clamp(-0.08, 0.08);
+        }
+    }
     // Horizontal movement towards the target (except during knockback from a hit).
     if m.knockback_ticks > 0 {
         m.knockback_ticks -= 1;
@@ -1743,7 +2534,7 @@ fn ai(server: &Server, world: &mut World, m: &mut Mob, seen: &[Seen], groups: &s
             let dir = [dx / len, dz / len];
             // Careful fighters look before they step: no walking into lava or off a cliff while
             // dodging, backing off or circling (they turn the other way instead).
-            if matches!(kind, MobKind::Skeleton | MobKind::Pillager | MobKind::Vindicator | MobKind::Creeper) && hazard_ahead(world, m.pos, dir) {
+            if (kind.skeleton_like() || matches!(kind, MobKind::Pillager | MobKind::Vindicator | MobKind::Creeper)) && hazard_ahead(world, m.pos, dir) {
                 m.vel[0] = 0.0;
                 m.vel[2] = 0.0;
                 m.strafe = -m.strafe;
@@ -1994,9 +2785,9 @@ fn creeper_approach(world: &mut World, m: &mut Mob, t: &Seen) -> [f64; 3] {
 /// unless it is the only way; ranged fighters and creepers keep away from hazards.
 fn path_profile(kind: MobKind) -> crate::world::pathfind::Profile {
     crate::world::pathfind::Profile {
-        doors: matches!(kind, MobKind::Zombie | MobKind::Vindicator),
+        doors: kind.zombie_like() || kind == MobKind::Vindicator,
         water: if kind == MobKind::Creeper { 80 } else { 16 },
-        hazards: matches!(kind, MobKind::Skeleton | MobKind::Pillager | MobKind::Vindicator | MobKind::Creeper),
+        hazards: kind.skeleton_like() || matches!(kind, MobKind::Pillager | MobKind::Vindicator | MobKind::Creeper),
     }
 }
 
@@ -2034,12 +2825,23 @@ pub(super) fn face(m: &mut Mob, target: [f64; 3]) {
 }
 
 fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
+    // Vexes fly through anything.
+    if m.kind == MobKind::Vex {
+        for i in 0..3 {
+            m.pos[i] += m.vel[i];
+        }
+        return;
+    }
     let wet = in_water(world, m.pos);
     let lava = in_lava(world, m.pos);
     if m.kind.flies() {
         for v in &mut m.vel {
             *v *= 0.91;
         }
+        m.fall = 0.0;
+    } else if wet && m.kind.swims() {
+        // Swimmers neither float nor sink: the AI steers them up and down.
+        m.vel[1] *= 0.9;
         m.fall = 0.0;
     } else if wet || (lava && m.kind == MobKind::Strider) {
         // They float towards the surface (the strider, in lava). A jump out at the bank keeps
@@ -2086,7 +2888,7 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
     }
     // Mob fall damage.
     if landed {
-        if m.fall > 3.0 && !wet && !matches!(m.kind, MobKind::MagmaCube) {
+        if m.fall > 3.0 && !wet && !m.kind.cube() {
             m.health -= (m.fall - 3.0).ceil() as f32;
             m.hurt_time = 10;
             actions.push(Action::Sound(m.eid, "entity.generic.big_fall".into(), m.kind.sound_category()));
@@ -2096,7 +2898,7 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
         m.fall -= d[1];
     }
     m.on_ground = landed;
-    if landed && m.kind == MobKind::MagmaCube {
+    if landed && m.kind.cube() {
         m.vel[0] *= 0.3;
         m.vel[2] *= 0.3;
     }
@@ -2124,7 +2926,7 @@ fn physics(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
             }
         }
     }
-    if m.knockback_ticks > 0 && m.kind != MobKind::MagmaCube {
+    if m.knockback_ticks > 0 && !m.kind.cube() {
         let f = if m.on_ground { 0.6 } else { 0.91 };
         m.vel[0] *= f;
         m.vel[2] *= f;
@@ -2169,6 +2971,35 @@ pub fn charge(server: &Server, eid: i32) {
         metadata(m)
     };
     server.broadcast_tracked(eid, &meta, true);
+}
+
+/// A mob turns into another kind: the old entity goes, the new one takes its place (keeping
+/// its villager data and how hurt it was).
+pub fn convert(server: &Arc<Server>, eid: i32, to: MobKind) {
+    let Some(old) = server.mobs.lock().unwrap().remove(&eid) else { return };
+    let new = spawn(server, old.dim, to, old.pos);
+    biome_variant(server, new);
+    if let Some(m) = server.mobs.lock().unwrap().get_mut(&new) {
+        m.yaw = old.yaw;
+        m.health = (old.health / old.max_health() * m.max_health()).clamp(1.0, m.max_health());
+        if old.villager.is_some() {
+            m.villager = old.villager.clone();
+        }
+    }
+    let snd = match (old.kind, to) {
+        (MobKind::Zombie, MobKind::Drowned) => "entity.zombie.converted_to_drowned",
+        (MobKind::Husk, _) => "entity.husk.converted_to_zombie",
+        (MobKind::ZombieVillager, _) => "entity.zombie_villager.converted",
+        _ => "entity.zombie.infect",
+    };
+    sound::entity(server, new, snd, sound::HOSTILE, 1.0, 1.0);
+}
+
+/// A splash potion of Weakness on a mob.
+pub fn weaken(server: &Server, eid: i32, ticks: u32) {
+    if let Some(m) = server.mobs.lock().unwrap().get_mut(&eid) {
+        m.weak = m.weak.max(ticks);
+    }
 }
 
 /// Removes a mob without a death (it turns into something else).
@@ -2289,6 +3120,9 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
             None
         } else {
             let before_target = m.target;
+            // Witches barely feel magic; horse armor protects.
+            let amount = if m.kind == MobKind::Witch && kind == "magic" { amount * 0.15 } else { amount };
+            let amount = amount * (1.0 - m.armor.as_ref().map_or(0.0, |a| super::horses::armor_points(a.name())).min(20.0) / 25.0);
             m.health -= amount;
             m.hurt_time = 10;
             if let Some(k) = knock {
@@ -2299,7 +3133,11 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
                 m.fire = m.fire.max(1);
             }
             match m.kind {
-                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf | MobKind::Spider | MobKind::CaveSpider | MobKind::Vindicator | MobKind::Bee => {
+                MobKind::ZombifiedPiglin | MobKind::Enderman | MobKind::Piglin | MobKind::Pillager | MobKind::Wolf | MobKind::Spider | MobKind::CaveSpider | MobKind::Vindicator | MobKind::Bee | MobKind::IronGolem | MobKind::PolarBear | MobKind::Dolphin | MobKind::Llama => {
+                    // Golems (and the rest) also fight back at mobs.
+                    if by_player.is_none() && by.is_some() && m.kind == MobKind::IronGolem {
+                        m.prey = by;
+                    }
                     // A tamed wolf does not turn on anyone; a wild one calls its pack.
                     if let Some(p) = by_player.filter(|_| m.owner.is_none()) {
                         m.angry = 400 + (entities::random() * 400.0) as u32;
@@ -2311,7 +3149,17 @@ pub fn hurt(server: &Arc<Server>, eid: i32, amount: f32, kind: &str, by: Option<
                     m.sitting = false;
                 }
                 k if k.hostile() => {
-                    if let Some(p) = by {
+                    match (by_player, by) {
+                        (Some(p), _) => m.target = Some(p),
+                        // Hit by a mob (a golem, a wolf): it fights back at it.
+                        (None, Some(e)) if e != m.eid => m.prey = Some(e),
+                        _ => {}
+                    }
+                }
+                // Aggressive pandas fight back; the others run.
+                MobKind::Panda if super::wildlife::panda_gene(m) == 6 => {
+                    if let Some(p) = by_player {
+                        m.angry = 400;
                         m.target = Some(p);
                     }
                 }
@@ -2398,14 +3246,50 @@ fn on_death(server: &Arc<Server>, m: &Mob, killer: Option<i32>) {
         })
         .unwrap_or(0);
     let mut drops = gameplay::get().mob_drops(m.kind.name(), player.is_some(), looting, &mut entities::random);
+    // An iron golem drops 3-5 iron ingots and 0-2 poppies.
+    if m.kind == MobKind::IronGolem {
+        drops = [("iron_ingot", 3 + (entities::random() * 3.0) as i8), ("poppy", (entities::random() * 3.0) as i8)]
+            .iter()
+            .filter(|(_, n)| *n > 0)
+            .filter_map(|(i, n)| data::get().item_id(i).map(|id| (id, *n)))
+            .collect();
+    }
+    // Saddle, armor and chest of horses and llamas; whoever rode it gets off.
+    for it in super::horses::belongings(m) {
+        entities::spawn(server, m.dim, m.center(), [(entities::random() as f64 - 0.5) * 0.2, 0.2, (entities::random() as f64 - 0.5) * 0.2], it, 10);
+    }
+    if let Some(r) = m.rider.and_then(|r| server.players.read().unwrap().get(&r).cloned()) {
+        super::horses::unmount(server, &r, m.eid, false);
+    }
     // Babies drop nothing.
     if m.grow < 0 {
         drops.clear();
     }
     if m.kind == MobKind::MagmaCube {
-        // There are no frogs: only magma cream, and only from large cubes.
+        // Magma cream only from large cubes.
         let cream = data::get().item_id("magma_cream");
         drops.retain(|d| Some(d.0) == cream && m.size > 1);
+    }
+    // Slimeballs only from the smallest slimes.
+    if m.kind == MobKind::Slime && m.size > 1 {
+        drops.clear();
+    }
+    // A villager killed by a zombie may come back as a zombie villager.
+    if m.kind == MobKind::Villager {
+        let zombie = killer.and_then(|k| kind_of(server, k)).is_some_and(MobKind::zombie_like);
+        let chance = match server.config.difficulty {
+            2 => 0.5,
+            3 => 1.0,
+            _ => 0.0,
+        };
+        if zombie && entities::random() < chance {
+            let eid = spawn(server, m.dim, MobKind::ZombieVillager, m.pos);
+            if let Some(z) = server.mobs.lock().unwrap().get_mut(&eid) {
+                z.villager = m.villager.clone();
+                z.yaw = m.yaw;
+            }
+            sound::entity(server, eid, "entity.zombie_villager.converted", sound::HOSTILE, 1.0, 1.0);
+        }
     }
     if let Some(p) = &player {
         super::advancements::grant(server, p, "adventure/root");
@@ -2420,8 +3304,9 @@ fn on_death(server: &Arc<Server>, m: &Mob, killer: Option<i32>) {
             if let Some(b) = super::pillagers::ominous_banner() {
                 entities::spawn(server, m.dim, m.center(), [0.0, 0.2, 0.0], b, 10);
             }
-            if let Some(p) = &player {
-                effects::add(server, p, "bad_omen", 0, 120000, 1.0);
+            if let Some(p) = player.as_ref().filter(|_| m.raid == 0) {
+                let level = super::raids::omen_level(p);
+                effects::add(server, p, "bad_omen", level, 120000, 1.0);
             }
         }
         if player.is_some() && entities::random() < 0.085 + 0.01 * looting as f32 {
@@ -2446,19 +3331,19 @@ fn on_death(server: &Arc<Server>, m: &Mob, killer: Option<i32>) {
         }
         entities::spawn(server, m.dim, m.center(), [(entities::random() as f64 - 0.5) * 0.2, 0.2, (entities::random() as f64 - 0.5) * 0.2], stack, 10);
     }
-    // A magma cube splits into 2-4 smaller ones.
-    if m.kind == MobKind::MagmaCube && m.size > 1 {
+    // A magma cube or a slime splits into 2-4 smaller ones.
+    if m.kind.cube() && m.size > 1 {
         for _ in 0..2 + (entities::random() * 3.0) as i32 {
             let off = [(entities::random() as f64 - 0.5) * m.size as f64 * 0.5, 0.5, (entities::random() as f64 - 0.5) * m.size as f64 * 0.5];
-            let eid = spawn(server, m.dim, MobKind::MagmaCube, [m.pos[0] + off[0], m.pos[1] + off[1], m.pos[2] + off[2]]);
+            let eid = spawn(server, m.dim, m.kind, [m.pos[0] + off[0], m.pos[1] + off[1], m.pos[2] + off[2]]);
             set_size(server, eid, m.size / 2);
         }
     }
     if player.is_some() && m.grow >= 0 {
         let xp = match m.kind {
-            MobKind::Villager => 0,
+            MobKind::Villager | MobKind::IronGolem => 0,
             MobKind::Blaze => 10,
-            MobKind::MagmaCube => m.size,
+            MobKind::MagmaCube | MobKind::Slime => m.size,
             MobKind::Endermite => 3,
             k if k.hostile() => 5,
             _ => 1 + (entities::random() * 3.0) as i32,
@@ -2513,6 +3398,13 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32)
         let st = player.state.lock().unwrap();
         st.inv.held(hand, st.held_slot).clone()
     };
+    // Horses and llamas: riding, saddles, armor, chests, food.
+    if super::horses::is_horse(kind) && super::horses::interact(server, player, eid, hand, held.as_ref()) {
+        return;
+    }
+    if super::pets::interact(server, player, eid, kind, hand, held.as_ref()) {
+        return;
+    }
     // Feeding, breeding, taming and wolves sitting down.
     if super::animals::interact(server, player, eid, hand, held.as_ref().map(|h| h.name())) {
         return;
@@ -2523,15 +3415,18 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32)
     }
     let Some(held) = held else { return };
     match (kind, held.name()) {
-        (MobKind::Cow, "bucket") => {
+        (MobKind::Cow | MobKind::Goat, "bucket") => {
             let milk = reg.item_id("milk_bucket").map(|m| ItemStack::new(m, 1));
             let mut st = player.state.lock().unwrap();
             if st.game_mode != 1 {
                 let h = st.held_slot;
                 st.inv.consume_held(hand, h, 1, milk);
-                let p = st.inv.window_items();
-                player.send(p);
+            } else if let Some(m) = milk.filter(|m| !st.inv.slots.iter().flatten().any(|s| s.id == m.id)) {
+                // In creative the empty bucket stays and a full one is added (like vanilla).
+                st.inv.add(m);
             }
+            let p = st.inv.window_items();
+            player.send(p);
             drop(st);
             sound::entity(server, eid, "entity.cow.milk", sound::PLAYER, 1.0, 1.0);
         }
@@ -2549,6 +3444,24 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32, hand: i32)
             }
             sound::entity(server, eid, "entity.sheep.shear", sound::PLAYER, 1.0, 1.0);
             health::wear_held(server, player, 1);
+        }
+        // Weakness and a golden apple: the zombie villager starts to be cured.
+        (MobKind::ZombieVillager, "golden_apple") => {
+            {
+                let mut mobs = server.mobs.lock().unwrap();
+                let Some(m) = mobs.get_mut(&eid).filter(|m| m.weak > 0 && m.convert == 0) else { return };
+                m.convert = 3600 + (entities::random() * 2400.0) as u32;
+                let mut st = packet(id::play::ENTITY_STATUS);
+                st.i32(eid).i8(16);
+                server.broadcast_tracked(eid, &st, true);
+                server.broadcast_tracked(eid, &metadata(m), true);
+            }
+            let mut st = player.state.lock().unwrap();
+            if st.game_mode != 1 {
+                let h = st.held_slot;
+                let slot = st.inv.consume_held(hand, h, 1, None);
+                st.sync_slot(player, slot);
+            }
         }
         (MobKind::Piglin, "gold_ingot") => {
             {
@@ -2599,6 +3512,25 @@ fn block_lit(world: &mut World, p: [f64; 3]) -> bool {
         }
     }
     false
+}
+
+pub(super) fn spawn_spot_at(world: &mut World, x: i32, z: i32, from_y: i32, room: i32) -> Option<[f64; 3]> {
+    spawn_spot(world, x, z, from_y, room)
+}
+
+/// Animals whose looks depend on where they live (rabbits, foxes, frogs) take them from the
+/// biome they are in.
+pub fn biome_variant(server: &Server, eid: i32) {
+    let Some((dim, kind, pos)) = server.mobs.lock().unwrap().get(&eid).map(|m| (m.dim, m.kind, m.pos)) else { return };
+    if dim != Dimension::Overworld {
+        return;
+    }
+    let biome = server.world(dim).lock().unwrap().generator().biome_name(pos[0].floor() as i32, pos[2].floor() as i32);
+    if let Some(v) = super::wildlife::biome_variant(kind, biome) {
+        if let Some(m) = server.mobs.lock().unwrap().get_mut(&eid) {
+            m.variant = v;
+        }
+    }
 }
 
 fn spawn_spot(world: &mut World, x: i32, z: i32, from_y: i32, room: i32) -> Option<[f64; 3]> {
@@ -2657,19 +3589,20 @@ fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
     }
     // Thunderstorms darken the sky enough for monsters to spawn.
     let night = !is_day(server) || server.weather.lock().unwrap().is_thundering();
-    let counts: Vec<(usize, usize)> = {
+    let counts: Vec<(usize, usize, usize)> = {
         let mobs = server.mobs.lock().unwrap();
         seen.iter()
             .map(|s| {
                 let near = mobs.values().filter(|m| m.dim == s.dim && dist2(&m.pos, &s.pos) < 128.0 * 128.0);
                 let (h, p): (Vec<_>, Vec<_>) = near.partition(|m| m.kind.hostile());
-                (h.len(), p.iter().filter(|m| m.kind != MobKind::Villager && m.kind != MobKind::EndCrystal).count())
+                let water = p.iter().filter(|m| m.kind.aquatic()).count();
+                (h.len(), p.iter().filter(|m| !matches!(m.kind, MobKind::Villager | MobKind::EndCrystal | MobKind::IronGolem) && !m.kind.aquatic()).count(), water)
             })
             .collect()
     };
     let monsters = server.config.spawn_monsters && server.config.difficulty > 0;
     let mut to_spawn: Vec<(Dimension, MobKind, [f64; 3])> = Vec::new();
-    for (s, &(hostile, passive)) in seen.iter().zip(&counts) {
+    for (s, &(hostile, passive, water)) in seen.iter().zip(&counts) {
         let mut world = server.world(s.dim).lock().unwrap();
         let a = entities::random() as f64 * std::f64::consts::TAU;
         let r = 24.0 + entities::random() as f64 * 40.0;
@@ -2698,29 +3631,68 @@ fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
                     if !ok {
                         continue;
                     }
-                    let kind = pick(&[(MobKind::Zombie, 95), (MobKind::Skeleton, 100), (MobKind::Creeper, 100), (MobKind::Spider, 100), (MobKind::Enderman, 10)]);
+                    let mut kind = pick(&[(MobKind::Zombie, 95), (MobKind::ZombieVillager, 5), (MobKind::Skeleton, 100), (MobKind::Creeper, 100), (MobKind::Spider, 100), (MobKind::Enderman, 10), (MobKind::Witch, 5)]);
+                    let biome = world.generator().biome_name(mx, mz);
+                    let open = sky_exposed(&mut world, at);
+                    // Deserts have husks and snowy lands strays, under the open sky.
+                    if open && kind == MobKind::Zombie && biome == "desert" && entities::random() < 0.8 {
+                        kind = MobKind::Husk;
+                    }
+                    if open && kind == MobKind::Skeleton && matches!(biome, "snowy_plains" | "snowy_taiga" | "snowy_beach" | "snowy_slopes" | "frozen_river" | "frozen_ocean") && entities::random() < 0.8 {
+                        kind = MobKind::Stray;
+                    }
+                    // Slimes: swamps at night, and slime chunks deep down.
+                    if (open && biome == "swamp" && (50..70).contains(&(at[1] as i32)) && entities::random() < 0.15)
+                        || (at[1] < 40.0 && entities::random() < 0.25 && super::monsters::slime_chunk(server.config.generation.options.seed as i64, mx >> 4, mz >> 4))
+                    {
+                        kind = MobKind::Slime;
+                    }
                     if kind != MobKind::Enderman || spawn_spot_below(&mut world, mx, mz, at[1] as i32, 3, 0).is_some() {
                         to_spawn.push((s.dim, kind, at));
                         room -= 1;
                     }
                 }
-                // Animals: on grass, every so often, in small groups.
-                if server.config.spawn_animals && age % 200 == 0 && passive < PASSIVE_CAP && below == "grass_block" {
+                // Drowned in rivers and oceans, in the dark.
+                if monsters && room > 0 && entities::random() < 0.3 {
+                    let a = entities::random() as f64 * std::f64::consts::TAU;
+                    let r = 24.0 + entities::random() as f64 * 40.0;
+                    let (wx, wz) = ((s.pos[0] + a.cos() * r).floor() as i32, (s.pos[2] + a.sin() * r).floor() as i32);
+                    let biome = world.generator().biome_name(wx, wz);
+                    if world.is_loaded(wx >> 4, wz >> 4) && (biome.contains("ocean") || biome.contains("river")) {
+                        if let Some(at) = super::monsters::water_spot(&mut world, wx, wz, s.pos[1] as i32) {
+                            let dark = if sky_exposed(&mut world, at) { night } else { !block_lit(&mut world, at) };
+                            if dark {
+                                to_spawn.push((s.dim, MobKind::Drowned, at));
+                            }
+                        }
+                    }
+                }
+                // Animals: every so often, in small groups, depending on the biome and the ground.
+                if server.config.spawn_animals && age % 200 == 0 && passive < PASSIVE_CAP {
                     let biome = world.generator().biome_name(x, z);
-                    let wolves = (biome.contains("forest") || biome.contains("taiga") || biome == "grove") && entities::random() < 0.25;
-                    let ocelots = biome.contains("jungle") && entities::random() < 0.3;
-                    let cats = !world.generator().village_centers_near(x, z, 48).is_empty() && entities::random() < 0.3;
-                    let kind = if wolves {
-                        MobKind::Wolf
-                    } else if ocelots {
-                        MobKind::Ocelot
-                    } else if cats {
-                        MobKind::Cat
-                    } else {
-                        [MobKind::Cow, MobKind::Pig, MobKind::Sheep, MobKind::Chicken][(entities::random() * 4.0) as usize % 4]
-                    };
-                    for i in 0..2 + (entities::random() * 2.0) as i32 {
-                        to_spawn.push((s.dim, kind, [spot[0] + i as f64 * 0.7, spot[1], spot[2]]));
+                    let village = !world.generator().village_centers_near(x, z, 48).is_empty();
+                    if let Some((kind, group)) = animal_for(biome, &below, village) {
+                        for i in 0..group {
+                            to_spawn.push((s.dim, kind, [spot[0] + i as f64 * 0.7, spot[1], spot[2]]));
+                        }
+                    }
+                }
+                // Water creatures: fish, squid, dolphins; glow squid and axolotls in dark water underground.
+                if server.config.spawn_animals && age % 40 == 0 && water < WATER_CAP {
+                    let a = entities::random() as f64 * std::f64::consts::TAU;
+                    let r = 16.0 + entities::random() as f64 * 40.0;
+                    let (wx, wz) = ((s.pos[0] + a.cos() * r).floor() as i32, (s.pos[2] + a.sin() * r).floor() as i32);
+                    if world.is_loaded(wx >> 4, wz >> 4) {
+                        let biome = world.generator().biome_name(wx, wz);
+                        let y0 = s.pos[1] as i32 + (entities::random() * 24.0) as i32 - 16;
+                        if let Some(at) = super::monsters::water_spot(&mut world, wx, wz, y0) {
+                            let deep = !sky_exposed(&mut world, at);
+                            if let Some((kind, group)) = water_creature_for(biome, deep, &mut world, at) {
+                                for i in 0..group {
+                                    to_spawn.push((s.dim, kind, [at[0] + (i % 2) as f64 * 0.6, at[1] + 0.3, at[2] + (i / 2) as f64 * 0.6]));
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2765,9 +3737,13 @@ fn natural_spawn(server: &Arc<Server>, seen: &[Seen], age: i64) {
         }
     }
     for (dim, kind, pos) in to_spawn {
-        spawn(server, dim, kind, pos);
+        let eid = spawn(server, dim, kind, pos);
+        biome_variant(server, eid);
     }
     super::villagers::populate_villages(server, seen);
+    if age % 600 == 0 {
+        super::golems::village_watch(server, seen);
+    }
 }
 
 

@@ -1,6 +1,12 @@
 //! Global server state and periodic tasks.
 
 pub mod admin;
+pub mod raids;
+pub mod golems;
+pub mod horses;
+pub mod pets;
+pub mod wildlife;
+pub mod monsters;
 pub mod hoppers;
 pub mod mechanisms;
 pub mod auth;
@@ -153,6 +159,10 @@ pub struct PlayerState {
     pub spawn_point: Option<BlockPos>,
     /// Sleeping in this bed.
     pub sleeping: Option<BlockPos>,
+    /// Ticks since the player last slept (or died): phantoms come after three days.
+    pub rest: i64,
+    /// Parrot riding on the left shoulder (its variant).
+    pub shoulder: Option<i32>,
     pub sleep_ticks: u32,
     pub portal_ticks: u32,
     pub portal_cooldown: u32,
@@ -219,6 +229,8 @@ impl PlayerState {
             xp_seed: (entities::random() * i32::MAX as f32) as i32,
             chat_times: Vec::new(),
             spawn_point: None,
+            rest: 0,
+            shoulder: None,
             sleeping: None,
             sleep_ticks: 0,
             portal_ticks: 0,

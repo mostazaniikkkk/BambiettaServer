@@ -36,6 +36,12 @@ pub struct PlayerData {
     pub effects: Vec<(String, i32, i32)>,
     #[serde(default)]
     pub absorption: f32,
+    /// Ticks since the player last slept.
+    #[serde(default)]
+    pub rest: i64,
+    /// Parrot on the shoulder (variant).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shoulder: Option<i32>,
     /// Advancements made: (id, Unix ms).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub advancements: Vec<(String, i64)>,
@@ -90,6 +96,8 @@ pub fn apply(data: PlayerData, st: &mut PlayerState) -> crate::world::Dimension 
         .collect();
     st.absorption = data.absorption.clamp(0.0, 16.0);
     st.advancements = data.advancements.into_iter().collect();
+    st.rest = data.rest;
+    st.shoulder = data.shoulder;
     st.ac = super::anticheat::MoveState::new(data.pos);
     crate::world::Dimension::ALL.into_iter().find(|d| Some(d.name()) == data.dimension.as_deref()).unwrap_or(crate::world::Dimension::Overworld)
 }
@@ -116,6 +124,8 @@ pub fn save(server: &Server, player: &Arc<Player>) {
             effects: st.effects.iter().map(|e| (super::effects::name(e.id).to_string(), e.amp, e.duration)).collect(),
             absorption: st.absorption,
             advancements: st.advancements.iter().map(|(k, v)| (k.clone(), *v)).collect(),
+            rest: st.rest,
+            shoulder: st.shoulder,
             inventory: st
                 .inv
                 .slots

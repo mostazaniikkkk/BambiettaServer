@@ -56,7 +56,7 @@ fn tickable() -> &'static Vec<bool> {
                 let n = reg.block_of_state(s).name.as_str();
                 CROPS.contains(&n)
                     || SAPLINGS.contains(&n)
-                    || matches!(n, "farmland" | "pumpkin_stem" | "melon_stem" | "sweet_berry_bush" | "nether_wart" | "sugar_cane" | "cactus" | "grass_block" | "mycelium" | "ice" | "snow" | "bamboo" | "bamboo_sapling")
+                    || matches!(n, "farmland" | "pumpkin_stem" | "melon_stem" | "sweet_berry_bush" | "nether_wart" | "sugar_cane" | "cactus" | "grass_block" | "mycelium" | "ice" | "snow" | "bamboo" | "bamboo_sapling" | "turtle_egg" | "frogspawn")
             })
             .collect()
     })
@@ -146,6 +146,7 @@ pub fn tick(server: &Arc<Server>) {
         let raining = dim == Dimension::Overworld && server.weather.lock().unwrap().is_raining();
         let mut changes: Vec<(BlockPos, u16)> = Vec::new();
         let mut popped: Vec<(BlockPos, u16)> = Vec::new();
+        let mut hatched: Vec<(BlockPos, &'static str, i32)> = Vec::new();
         {
             let mut world = server.world(dim).lock().unwrap();
             let mut picked = Vec::new();
@@ -153,10 +154,13 @@ pub fn tick(server: &Arc<Server>) {
                 world.random_blocks(cx, cz, per_section, &|s| wanted.get(s as usize).copied().unwrap_or(false), &mut rand_u32, &mut picked);
             }
             for (p, state) in picked {
-                random_tick(&mut world, p, state, raining, &mut changes, &mut popped);
+                random_tick(&mut world, p, state, raining, &mut changes, &mut popped, &mut hatched);
             }
         }
         apply(server, dim, changes, popped);
+        if !hatched.is_empty() {
+            super::wildlife::hatch(server, dim, hatched);
+        }
     }
 }
 
@@ -179,13 +183,33 @@ fn set(world: &mut World, p: BlockPos, s: u16, changes: &mut Vec<(BlockPos, u16)
     }
 }
 
-fn random_tick(world: &mut World, p: BlockPos, state: u16, raining: bool, changes: &mut Vec<(BlockPos, u16)>, popped: &mut Vec<(BlockPos, u16)>) {
+#[allow(clippy::too_many_arguments)]
+fn random_tick(world: &mut World, p: BlockPos, state: u16, raining: bool, changes: &mut Vec<(BlockPos, u16)>, popped: &mut Vec<(BlockPos, u16)>, hatched: &mut Vec<(BlockPos, &'static str, i32)>) {
     let reg = data::get();
     let block = reg.block_of_state(state);
     let below = BlockPos::new(p.x, p.y - 1, p.z);
     let above = BlockPos::new(p.x, p.y + 1, p.z);
     let n = block.name.as_str();
     match n {
+        // Turtle eggs crack twice and hatch (on sand); frogspawn hatches into tadpoles.
+        "turtle_egg" => {
+            if name(world, below) == "sand" && rand(2) == 0 {
+                let stage: i32 = block.get(state, "hatch").and_then(|v| v.parse().ok()).unwrap_or(0);
+                if stage < 2 {
+                    set(world, p, block.with(state, "hatch", &(stage + 1).to_string()), changes);
+                } else {
+                    let eggs = block.get(state, "eggs").and_then(|v| v.parse().ok()).unwrap_or(1);
+                    set(world, p, 0, changes);
+                    hatched.push((p, "turtle_egg", eggs));
+                }
+            }
+        }
+        "frogspawn" => {
+            if rand(3) == 0 {
+                set(world, p, 0, changes);
+                hatched.push((p, "frogspawn", 2 + rand(5) as i32));
+            }
+        }
         "farmland" => {
             let m: i32 = block.get(state, "moisture").and_then(|v| v.parse().ok()).unwrap_or(0);
             let wet = water_near(world, p) || (raining && world.top_y(p.x, p.z) <= p.y);
@@ -615,7 +639,7 @@ mod tests {
         let p = BlockPos::new(0, Y, 0);
         for _ in 0..2000 {
             let s = w.get_block(p);
-            random_tick(&mut w, p, s, false, &mut Vec::new(), &mut Vec::new());
+            random_tick(&mut w, p, s, false, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         }
         let s = w.get_block(p);
         assert_eq!(data::get().block_of_state(s).get(s, "age"), Some("7"));
@@ -632,7 +656,7 @@ mod tests {
             if data::get().block_of_state(s).name != "oak_sapling" {
                 break;
             }
-            random_tick(&mut w, p, s, false, &mut Vec::new(), &mut Vec::new());
+            random_tick(&mut w, p, s, false, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         }
         assert_eq!(name(&mut w, p), "oak_log");
         assert_eq!(name(&mut w, BlockPos::new(0, Y + 3, 0)), "oak_log");
@@ -645,13 +669,13 @@ mod tests {
         put(&mut w, 0, Y - 1, 0, "farmland");
         let p = BlockPos::new(0, Y - 1, 0);
         let s = w.get_block(p);
-        random_tick(&mut w, p, s, false, &mut Vec::new(), &mut Vec::new());
+        random_tick(&mut w, p, s, false, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         assert_eq!(name(&mut w, p), "dirt");
         // Next to water it stays moist.
         put(&mut w, 0, Y - 1, 0, "farmland");
         put(&mut w, 3, Y - 1, 0, "water");
         let s = w.get_block(p);
-        random_tick(&mut w, p, s, false, &mut Vec::new(), &mut Vec::new());
+        random_tick(&mut w, p, s, false, &mut Vec::new(), &mut Vec::new(), &mut Vec::new());
         let s = w.get_block(p);
         assert_eq!(data::get().block_of_state(s).get(s, "moisture"), Some("7"));
     }

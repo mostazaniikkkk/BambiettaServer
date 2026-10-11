@@ -266,7 +266,11 @@ pub fn dismount(server: &Arc<Server>, player: &Arc<Player>, teleport: bool) {
             (passengers_packet(v), v.pos, v.kind)
         })
     };
-    let Some((p, pos, kind)) = out else { return };
+    // Not a boat or a minecart: a horse (or another mount).
+    let Some((p, pos, kind)) = out else {
+        super::horses::unmount(server, player, eid, teleport);
+        return;
+    };
     server.broadcast_tracked(eid, &p, false);
     player.send(p);
     if teleport {
@@ -322,6 +326,9 @@ fn dist2(a: &[f64; 3], b: &[f64; 3]) -> f64 {
 pub fn client_moved(server: &Arc<Server>, player: &Arc<Player>, pos: [f64; 3], yaw: f32) {
     let Some(eid) = player.state.lock().unwrap().vehicle else { return };
     if !pos.iter().all(|v| v.is_finite()) {
+        return;
+    }
+    if super::horses::client_moved(server, player, eid, pos, yaw) {
         return;
     }
     let ok = {

@@ -136,6 +136,7 @@ pub fn use_bed(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos, block:
     {
         let mut st = player.state.lock().unwrap();
         st.sleeping = Some(head);
+        st.rest = 0;
         st.sleep_ticks = 0;
         st.eating = None;
     }

@@ -24,6 +24,7 @@ pub enum ProjectileKind {
     EnderPearl,
     XpBottle,
     Trident,
+    LlamaSpit,
 }
 
 impl ProjectileKind {
@@ -37,6 +38,7 @@ impl ProjectileKind {
             ProjectileKind::EnderPearl => "ender_pearl",
             ProjectileKind::XpBottle => "experience_bottle",
             ProjectileKind::Trident => "trident",
+            ProjectileKind::LlamaSpit => "llama_spit",
         }
     }
 
@@ -526,6 +528,7 @@ fn impact(server: &Arc<Server>, a: &Projectile, hit: Hit, at: [f64; 3]) {
             }
             None => hurt((speed * 2.0).ceil() as f32, "arrow", false),
         },
+        ProjectileKind::LlamaSpit => hurt(1.0, "mob_projectile", false),
         ProjectileKind::Trident => {
             hurt(8.0, "trident", false);
             sound::at(server, a.dim, at, "item.trident.hit", sound::PLAYER, 1.0, 1.0);
@@ -619,11 +622,12 @@ fn splash(server: &Arc<Server>, a: &Projectile, item: &ItemStack, at: [f64; 3]) 
             continue;
         }
         let potency = 1.0 - d2.sqrt() / 4.0;
-        for (name, amp, _) in &list {
+        for (name, amp, dur) in &list {
             let amount = ((if *name == "instant_damage" { 6 } else { 4 } << amp) as f64 * potency) as f32;
             match *name {
                 "instant_damage" => mobs::magic(server, eid, amount, false, a.shooter),
                 "instant_health" => mobs::magic(server, eid, amount, true, a.shooter),
+                "weakness" => mobs::weaken(server, eid, (*dur as f64 * potency) as u32),
                 _ => {}
             }
         }

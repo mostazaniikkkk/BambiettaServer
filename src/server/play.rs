@@ -463,6 +463,14 @@ async fn handle_packet(
         ENTITY_ACTION => {
             let _eid = r.varint()?;
             let action = r.varint()?;
+            // 7: open the inventory of the horse being ridden.
+            if action == 7 {
+                let riding = player.state.lock().unwrap().vehicle;
+                if let Some(eid) = riding {
+                    super::horses::open_inventory(server, player, eid);
+                }
+                return Ok(());
+            }
             {
                 let mut s = player.state.lock().unwrap();
                 if action == 2 {
@@ -587,6 +595,7 @@ fn window_click(server: &Arc<Server>, player: &Arc<Player>, r: &mut Reader) -> R
         entities::throw_from(server, player, item);
     }
     super::containers::after_click(server, player, smelted);
+    super::horses::sync_window(server, player);
     super::stations::after_click(server, player, taken);
     super::enchanting::refresh(server, player);
     if armor_changed {
@@ -950,6 +959,9 @@ pub fn metadata(player: &Player) -> Vec<u8> {
     p.u8(10).varint(1).varint(color);
     p.u8(6).varint(20).varint(if sneaking { 5 } else { 0 });
     p.u8(17).varint(0).u8(0x7f);
+    // 19: what rides on the left shoulder (a parrot).
+    p.u8(19).varint(16);
+    super::pets::shoulder_nbt(player.state.lock().unwrap().shoulder).write_network(&mut p);
     p.u8(0xff);
     p
 }

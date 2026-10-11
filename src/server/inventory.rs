@@ -13,6 +13,11 @@ pub const OFFHAND: usize = 45;
 /// Menu types (`minecraft:menu` registry) in 1.20.3/1.20.4.
 const MENU_GENERIC_9X3: i32 = 2;
 const MENU_GENERIC_9X6: i32 = 5;
+const MENU_GENERIC_3X3: i32 = 6;
+pub const MENU_BLAST_FURNACE: i32 = 10;
+const MENU_HOPPER: i32 = 16;
+const MENU_LECTERN: i32 = 17;
+pub const MENU_SMOKER: i32 = 22;
 const MENU_CRAFTING: i32 = 12;
 const MENU_ENCHANTMENT: i32 = 13;
 const MENU_FURNACE: i32 = 14;
@@ -51,6 +56,12 @@ pub enum WindowKind {
     Cartography,
     /// 0 and 1 payment, 2 result.
     Merchant,
+    /// 5 slots (contents stored in the block).
+    Hopper,
+    /// Dispenser or dropper: 3x3 (contents stored in the block).
+    Dispenser,
+    /// The book on a lectern (read only; pages are turned with buttons).
+    Lectern,
 }
 
 /// Enchanting table offer.
@@ -81,7 +92,7 @@ pub struct OpenWindow {
 impl WindowKind {
     /// Do the contents live in the block (shared between players)?
     pub fn shared(self) -> bool {
-        matches!(self, WindowKind::Chest(_) | WindowKind::Furnace | WindowKind::Brewing)
+        matches!(self, WindowKind::Chest(_) | WindowKind::Furnace | WindowKind::Brewing | WindowKind::Hopper | WindowKind::Dispenser)
     }
 
     /// Workstations whose result is computed by `stations`.
@@ -437,6 +448,8 @@ impl Inventory {
             let to = |v: Vec<usize>| v.into_iter().map(Loc::Container).collect::<Vec<_>>();
             match kind {
                 WindowKind::Chest(rows) => return to((0..rows as usize * 9).collect()),
+                WindowKind::Hopper => return to((0..5).collect()),
+                WindowKind::Dispenser => return to((0..9).collect()),
                 WindowKind::Furnace if gameplay::smelt(it.name()).is_some() => return to(vec![0]),
                 WindowKind::Furnace if self.accepts(Loc::Container(1), it) => return to(vec![1]),
                 WindowKind::Enchanting if it.name() == "lapis_lazuli" => return to(vec![1]),
@@ -778,10 +791,15 @@ impl Inventory {
 
     /// Opens a container window with its initial contents.
     pub fn open(&mut self, kind: WindowKind, pos: BlockPos, slots: Vec<Slot>, title: &str) -> Vec<Vec<u8>> {
+        self.open_menu(kind, None, pos, slots, title)
+    }
+
+    /// Like `open`, with another menu of the same layout (smoker, blast furnace).
+    pub fn open_menu(&mut self, kind: WindowKind, menu: Option<i32>, pos: BlockPos, slots: Vec<Slot>, title: &str) -> Vec<Vec<u8>> {
         self.next_window = self.next_window % 100 + 1;
         let id = self.next_window;
         self.window = Some(OpenWindow { id, kind, slots, pos, pos2: None, offers: [None, None, None], station: Default::default() });
-        let menu = match kind {
+        let menu = menu.unwrap_or(match kind {
             WindowKind::Crafting => MENU_CRAFTING,
             WindowKind::Enchanting => MENU_ENCHANTMENT,
             WindowKind::Furnace => MENU_FURNACE,
@@ -795,7 +813,10 @@ impl Inventory {
             WindowKind::Loom => MENU_LOOM,
             WindowKind::Cartography => MENU_CARTOGRAPHY,
             WindowKind::Merchant => MENU_MERCHANT,
-        };
+            WindowKind::Hopper => MENU_HOPPER,
+            WindowKind::Dispenser => MENU_GENERIC_3X3,
+            WindowKind::Lectern => MENU_LECTERN,
+        });
         let mut p = packet(id::play::OPEN_WINDOW);
         p.varint(id as i32).varint(menu);
         text(title).write_network(&mut p);
@@ -811,7 +832,7 @@ impl Inventory {
     pub fn close(&mut self) -> Vec<ItemStack> {
         let mut back: Vec<ItemStack> = Vec::new();
         // Whatever was put in tables and workstations goes back to the player (except the result).
-        if let Some(w) = self.window.as_mut().filter(|w| !w.kind.shared()) {
+        if let Some(w) = self.window.as_mut().filter(|w| !w.kind.shared() && w.kind != WindowKind::Lectern) {
             let result = w.kind.result_slot();
             back.extend(w.slots.iter_mut().enumerate().filter(|(i, _)| Some(*i) != result).filter_map(|(_, s)| s.take()));
         }
@@ -913,7 +934,7 @@ impl Inventory {
         let mut out: Vec<ItemStack> = self.slots.iter_mut().filter_map(Option::take).collect();
         out.extend(self.cursor.take());
         // Chest and furnace contents belong to the block, not the player.
-        if let Some(w) = self.window.as_mut().filter(|w| !w.kind.shared()) {
+        if let Some(w) = self.window.as_mut().filter(|w| !w.kind.shared() && w.kind != WindowKind::Lectern) {
             let result = w.kind.result_slot();
             out.extend(w.slots.iter_mut().enumerate().filter(|(i, _)| Some(*i) != result).filter_map(|(_, s)| s.take()));
             w.slots.iter_mut().for_each(|s| *s = None);

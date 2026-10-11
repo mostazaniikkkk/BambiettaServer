@@ -380,6 +380,7 @@ async fn handle_packet(
             let kind = player.state.lock().unwrap().inv.window_kind();
             match kind {
                 Some(super::inventory::WindowKind::Enchanting) if (0..3).contains(&button) => super::enchanting::enchant(server, player, button as usize),
+                Some(super::inventory::WindowKind::Lectern) => super::mechanisms::lectern_button(server, player, button as u8 as i32),
                 Some(_) => super::stations::button(player, button as i32),
                 None => {}
             }
@@ -523,7 +524,8 @@ fn window_click(server: &Arc<Server>, player: &Arc<Player>, r: &mut Reader) -> R
 
     let (drops, armor_changed, smelted, taken) = {
         let mut st = player.state.lock().unwrap();
-        if st.dead || window != st.inv.window_id() {
+        // The lectern's book cannot be moved by clicking.
+        if st.dead || window != st.inv.window_id() || st.inv.window_kind() == Some(super::inventory::WindowKind::Lectern) {
             let p = st.inv.window_items();
             player.send(p);
             return Ok(());

@@ -163,6 +163,7 @@ fn break_block(server: &Arc<Server>, player: &Player, pos: BlockPos, drops: bool
     };
     // Chests and furnaces drop their contents (also in creative, like vanilla).
     let contents = super::containers::on_break(server, dim, pos);
+    super::mechanisms::broken(server, dim, pos, &block.name);
     set(server, dim, pos, 0);
     if block.name == "obsidian" || block.name == "nether_portal" {
         super::portals::break_portal_near(server, dim, pos);
@@ -301,6 +302,9 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         if super::signs::interact(server, player, req.location, clicked, clicked_state, req.hand) {
             return;
         }
+        if super::mechanisms::interact(server, player, req.location, clicked_state, &item, req.hand, req.face, sneaking) {
+            return;
+        }
         if super::containers::open(server, player, req.location, clicked) {
             return;
         }
@@ -436,7 +440,25 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         } else {
             opposite(look)
         };
+        let facing = match block.name.as_str() {
+            // The observer's face looks away from the player (at what it watches).
+            "observer" => opposite(facing),
+            // Hoppers point into the block they were placed against (never up).
+            "hopper" if horizontal_face => opposite(face_dir),
+            "hopper" => "down",
+            "bell" if horizontal_face => opposite(face_dir),
+            "bell" => look,
+            _ => facing,
+        };
         state = block.with(state, "facing", facing);
+    }
+    if block.name == "bell" {
+        let attachment = match req.face {
+            0 => "ceiling",
+            1 => "floor",
+            _ => "single_wall",
+        };
+        state = block.with(state, "attachment", attachment);
     }
     let top = req.face == 0 || (horizontal_face && req.cursor_y > 0.5);
     if block.has("half") {
@@ -546,6 +568,13 @@ fn interact(server: &Arc<Server>, dim: Dimension, pos: BlockPos, block: &Block, 
     if block.name == "repeater" {
         let d: i32 = block.get(state, "delay").and_then(|d| d.parse().ok()).unwrap_or(1);
         set(server, dim, pos, block.with(state, "delay", &(d % 4 + 1).to_string()));
+        return true;
+    }
+    // Comparator: compare or subtract.
+    if block.name == "comparator" {
+        let subtract = block.get(state, "mode") == Some("compare");
+        set(server, dim, pos, block.with(state, "mode", if subtract { "subtract" } else { "compare" }));
+        super::sound::at(server, dim, [pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5], "block.comparator.click", super::sound::BLOCK, 3.0, if subtract { 0.55 } else { 0.5 });
         return true;
     }
     if block.name == "note_block" {

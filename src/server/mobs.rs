@@ -380,6 +380,8 @@ pub struct Mob {
     pub nectar: bool,
     pub pollinate: u32,
     pub stung: u32,
+    /// Ticks left of the bell's effect: glows during the last `BELL_GLOW / 2`.
+    pub glowing: u32,
     pub explore: u32,
     pub anchor: Option<[f64; 3]>,
     pub approach: f64,
@@ -480,11 +482,18 @@ fn spawn_packets(m: &Mob) -> Vec<Vec<u8>> {
     out
 }
 
+/// A ringing bell: raiders start glowing 3 s later, for 3 s.
+pub const BELL_GLOW: u32 = 120;
+
+fn glows(m: &Mob) -> bool {
+    (1..=BELL_GLOW / 2).contains(&m.glowing)
+}
+
 pub fn metadata(m: &Mob) -> Vec<u8> {
     let mut p = packet(id::play::ENTITY_METADATA);
     p.varint(m.eid);
     // 0: flags (on fire).
-    p.u8(0).varint(0).i8(if m.fire > 0 && !m.kind.fire_immune() { 0x01 } else { 0 });
+    p.u8(0).varint(0).i8(if m.fire > 0 && !m.kind.fire_immune() { 0x01 } else { 0 } | if glows(m) { 0x40 } else { 0 });
     if m.kind.living() {
         // 9: health, 15: mob flags (aggressive = arms raised).
         p.u8(9).varint(3).f32(m.health.max(0.0));
@@ -658,6 +667,7 @@ pub fn spawn(server: &Server, dim: Dimension, kind: MobKind, pos: [f64; 3]) -> i
         nectar: false,
         pollinate: 0,
         stung: 0,
+        glowing: 0,
         explore: 0,
         anchor: None,
         approach: 0.0,
@@ -989,8 +999,9 @@ pub fn tick(server: &Arc<Server>, age: i64) {
                 if nearest > 160.0 * 160.0 && m.kind != MobKind::EnderDragon {
                     continue; // too far: frozen
                 }
-                let look = |m: &Mob| (m.target.is_some(), m.fire > 0, m.fuse.is_some(), m.angry > 0, m.burst > 0, m.charging, m.dragon.as_ref().map(|d| d.phase), m.charging(), m.nectar, m.stung > 0);
+                let look = |m: &Mob| (m.target.is_some(), m.fire > 0, m.fuse.is_some(), m.angry > 0, m.burst > 0, m.charging, m.dragon.as_ref().map(|d| d.phase), m.charging(), m.nectar, m.stung > 0, glows(m));
                 let before = look(m);
+                m.glowing = m.glowing.saturating_sub(1);
                 let health_before = m.health;
                 if m.kind == MobKind::EnderDragon {
                     super::dragon::ai(server, &mut world, m, &seen, &crystals, &mut actions);

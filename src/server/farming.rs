@@ -443,7 +443,11 @@ pub fn till(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos, face: i32
 
 /// Bone meal on a plant. Returns whether it was used (and must be consumed).
 pub fn bone_meal(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos) -> bool {
-    let dim = player.dim();
+    bone_meal_at(server, player.dim(), pos)
+}
+
+/// Bone meal on a block (by a player or a dispenser). Returns whether it was used.
+pub fn bone_meal_at(server: &Server, dim: Dimension, pos: BlockPos) -> bool {
     let reg = data::get();
     let mut changes = Vec::new();
     let used = {

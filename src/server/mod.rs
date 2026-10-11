@@ -1,6 +1,8 @@
 //! Global server state and periodic tasks.
 
 pub mod admin;
+pub mod hoppers;
+pub mod mechanisms;
 pub mod auth;
 pub mod advancements;
 pub mod animals;
@@ -492,6 +494,7 @@ impl Server {
             }
             mark("entidades");
             containers::tick_furnaces(&self);
+            hoppers::tick(&self);
             fluids::tick(&self, age);
             mark("fluidos");
             redstone::tick(&self, age);

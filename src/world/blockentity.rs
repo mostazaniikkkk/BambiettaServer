@@ -17,6 +17,12 @@ pub enum BlockEntity {
     Spawner { mob: String, delay: i32 },
     /// Bee nest or beehive: how many bees are inside.
     Hive { bees: u32 },
+    /// Jukebox: the record inside.
+    Jukebox(Slot),
+    /// Lectern: the book on it and the page it is open at.
+    Lectern { book: Slot, page: i32 },
+    /// Comparator: its output signal (0-15).
+    Comparator(u8),
 }
 
 /// Brewing stand: 0-2 bottles, 3 ingredient, 4 blaze powder.
@@ -132,6 +138,23 @@ pub struct Furnace {
     pub cook: i32,
     /// Accumulated experience from smelting (given when taking the output).
     pub xp: f32,
+    /// 0 furnace, 1 smoker (food only), 2 blast furnace (ores only).
+    pub kind: u8,
+}
+
+impl Furnace {
+    pub fn new(kind: u8) -> Self {
+        Self { items: vec![None; 3], kind, ..Default::default() }
+    }
+
+    pub fn kind_of(block: &str) -> Option<u8> {
+        match block {
+            "furnace" => Some(0),
+            "smoker" => Some(1),
+            "blast_furnace" => Some(2),
+            _ => None,
+        }
+    }
 }
 
 impl BlockEntity {
@@ -139,7 +162,12 @@ impl BlockEntity {
     pub fn for_block(name: &str) -> Option<BlockEntity> {
         match name {
             "chest" | "trapped_chest" | "barrel" => Some(BlockEntity::Container(vec![None; 27])),
-            "furnace" => Some(BlockEntity::Furnace(Furnace { items: vec![None; 3], ..Default::default() })),
+            "hopper" => Some(BlockEntity::Container(vec![None; 5])),
+            "dispenser" | "dropper" => Some(BlockEntity::Container(vec![None; 9])),
+            "furnace" | "smoker" | "blast_furnace" => Some(BlockEntity::Furnace(Furnace::new(Furnace::kind_of(name).unwrap_or(0)))),
+            "jukebox" => Some(BlockEntity::Jukebox(None)),
+            "lectern" => Some(BlockEntity::Lectern { book: None, page: 0 }),
+            "comparator" => Some(BlockEntity::Comparator(0)),
             "brewing_stand" => Some(BlockEntity::Brewing(Brewing { items: vec![None; 5], ..Default::default() })),
             n if n.ends_with("_sign") => Some(BlockEntity::Sign(Sign::default())),
             n if n.ends_with("_banner") => Some(BlockEntity::Banner(vec![])),
@@ -154,7 +182,9 @@ impl BlockEntity {
             BlockEntity::Container(items) => items.iter().flatten().cloned().collect(),
             BlockEntity::Furnace(f) => f.items.iter().flatten().cloned().collect(),
             BlockEntity::Brewing(b) => b.items.iter().flatten().cloned().collect(),
-            BlockEntity::Sign(_) | BlockEntity::Banner(_) | BlockEntity::Spawner { .. } | BlockEntity::Hive { .. } => vec![],
+            BlockEntity::Jukebox(record) => record.iter().cloned().collect(),
+            BlockEntity::Lectern { book, .. } => book.iter().cloned().collect(),
+            BlockEntity::Sign(_) | BlockEntity::Banner(_) | BlockEntity::Spawner { .. } | BlockEntity::Hive { .. } | BlockEntity::Comparator(_) => vec![],
         }
     }
 
@@ -254,7 +284,7 @@ pub fn load_slots(saved: &[SavedSlot], len: usize) -> Vec<Slot> {
 impl SavedBlockEntity {
     pub fn into_block_entity(self) -> BlockEntity {
         match self.kind.as_str() {
-            "furnace" => BlockEntity::Furnace(Furnace { items: load_slots(&self.items, 3), burn: self.burn, burn_total: self.burn_total, cook: self.cook, xp: self.xp }),
+            "furnace" => BlockEntity::Furnace(Furnace { items: load_slots(&self.items, 3), burn: self.burn, burn_total: self.burn_total, cook: self.cook, xp: self.xp, kind: 0 }),
             _ => BlockEntity::Container(load_slots(&self.items, 27)),
         }
     }

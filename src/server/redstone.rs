@@ -1,10 +1,12 @@
 //! Redstone: sources (levers, buttons, pressure plates, redstone block, torches,
-//! repeaters), wire with 0-15 power and its connections, strong/weak power through
-//! solid blocks, and consumers (lamps, doors, trapdoors, fence gates, powered rails,
-//! note blocks, TNT and pistons).
+//! repeaters, comparators, observers, lecterns), wire with 0-15 power and its connections,
+//! strong/weak power through solid blocks, and consumers (lamps, doors, trapdoors, fence
+//! gates, powered rails, note blocks, TNT, pistons, hoppers, droppers, dispensers and bells).
 //!
 //! Update-driven: when a block changes, nearby wire and components are recomputed;
-//! torches, repeaters, buttons and TNT use scheduled ticks.
+//! torches, repeaters, comparators, observers, buttons and TNT use scheduled ticks.
+//! Comparators read the strength behind them, or how full the container behind them is
+//! (also through a solid block), and compare or subtract the strongest side input.
 
 use super::{Player, Server};
 use crate::data::{self, Block};
@@ -63,7 +65,8 @@ pub fn changed(server: &Server, dim: Dimension, pos: BlockPos) {
     server.redstone.lock().unwrap().dirty.push((dim, pos));
 }
 
-fn schedule(server: &Server, dim: Dimension, pos: BlockPos, delay: i64) {
+/// Schedules a tick for the block at `pos` (repeaters, observers, a composter getting ready...).
+pub fn schedule(server: &Server, dim: Dimension, pos: BlockPos, delay: i64) {
     let mut r = server.redstone.lock().unwrap();
     if r.scheduled.insert((dim, pos)) {
         let at = server.age.load(Ordering::Relaxed) + delay.max(1);
@@ -142,7 +145,73 @@ impl Ctx<'_> {
                 let facing = b.get(s, "facing").unwrap_or("north");
                 if to == off(from, dir_vec(opposite(facing))) { 15 } else { 0 }
             }
+            "comparator" => {
+                let facing = b.get(s, "facing").unwrap_or("north");
+                if to == off(from, dir_vec(opposite(facing))) { self.comparator_stored(from) } else { 0 }
+            }
+            // The observer looks towards `facing` and powers the block behind it.
+            "observer" if on("powered") => {
+                let facing = b.get(s, "facing").unwrap_or("north");
+                if to == off(from, dir_vec(opposite(facing))) { 15 } else { 0 }
+            }
+            "lectern" if on("powered") => {
+                if !strong || to == off(from, (0, -1, 0)) { 15 } else { 0 }
+            }
             _ => 0,
+        }
+    }
+
+    fn comparator_stored(&mut self, p: BlockPos) -> u8 {
+        match self.world.peek_block_entity(p) {
+            Some(crate::world::blockentity::BlockEntity::Comparator(o)) => *o,
+            _ => 0,
+        }
+    }
+
+    /// Strength `from` gives into `to`: components, wire, or a powered solid block.
+    fn input_level(&mut self, from: BlockPos, to: BlockPos) -> u8 {
+        let mut level = self.component_signal(from, to, false).max(self.wire_signal(from, to));
+        if self.conductor(from) {
+            level = level.max(self.block_power(from, Some(to), false));
+        }
+        level
+    }
+
+    /// What a comparator outputs (vanilla ComparatorBlock.calculateOutputSignal).
+    fn comparator_output(&mut self, p: BlockPos, b: &Block, s: u16) -> u8 {
+        let facing = b.get(s, "facing").unwrap_or("north");
+        let back = off(p, dir_vec(facing));
+        let mut rear = self.input_level(back, p);
+        // A container (or another readable block) behind it, or behind a solid block.
+        if let Some(a) = super::mechanisms::analog_signal(self.world, back) {
+            rear = a;
+        } else if rear < 15 && self.conductor(back) {
+            if let Some(a) = super::mechanisms::analog_signal(self.world, off(back, dir_vec(facing))) {
+                rear = a;
+            }
+        }
+        if rear == 0 {
+            return 0;
+        }
+        // Side inputs: only wire, redstone blocks, repeaters and comparators.
+        let sides: [&str; 2] = if matches!(facing, "north" | "south") { ["east", "west"] } else { ["north", "south"] };
+        let mut side = 0;
+        for d in sides {
+            let n = off(p, dir_vec(d));
+            let (nb, ns) = self.block(n);
+            side = side.max(match nb.name.as_str() {
+                "redstone_wire" => nb.get(ns, "power").and_then(|v| v.parse().ok()).unwrap_or(0),
+                "redstone_block" => 15,
+                "repeater" | "comparator" => self.component_signal(n, p, false),
+                _ => 0,
+            });
+        }
+        if side > rear {
+            0
+        } else if b.get(s, "mode") == Some("subtract") {
+            rear - side
+        } else {
+            rear
         }
     }
 
@@ -350,6 +419,13 @@ impl Ctx<'_> {
 pub fn tick(server: &Arc<Server>, age: i64) {
     tick_plates(server, age);
     tick_tnt(server);
+    // Observers whose block changed fire 2 ticks later.
+    for dim in Dimension::ALL {
+        let hits = std::mem::take(&mut server.world(dim).lock().unwrap().observer_hits);
+        for q in hits {
+            schedule(server, dim, q, 2);
+        }
+    }
     let (due, dirty) = {
         let mut r = server.redstone.lock().unwrap();
         let mut due = Vec::new();
@@ -394,6 +470,7 @@ fn update_area(server: &Arc<Server>, dim: Dimension, positions: &HashSet<BlockPo
     let mut notes: Vec<(BlockPos, u16)> = Vec::new();
     let mut primed: Vec<BlockPos> = Vec::new();
     let mut pistons: Vec<(BlockPos, bool)> = Vec::new();
+    let mut bells: Vec<(BlockPos, i32)> = Vec::new();
     {
         let mut world = server.world(dim).lock().unwrap();
         let mut c = Ctx { world: &mut world };
@@ -468,6 +545,38 @@ fn update_area(server: &Arc<Server>, dim: Dimension, positions: &HashSet<BlockPo
                         primed.push(p);
                     }
                 }
+                "comparator" => {
+                    if c.comparator_output(p, b, s) != c.comparator_stored(p) {
+                        to_schedule.push((p, 2));
+                    }
+                }
+                "hopper" => {
+                    // A powered hopper stops.
+                    let want = !c.powered(p, None);
+                    if want != on("enabled") {
+                        changes.push((p, b.with(s, "enabled", if want { "true" } else { "false" })));
+                    }
+                }
+                "dispenser" | "dropper" => {
+                    // Also powered from the block above (like vanilla).
+                    let want = c.powered(p, None) || c.powered(off(p, (0, 1, 0)), None);
+                    if want && !on("triggered") {
+                        changes.push((p, b.with(s, "triggered", "true")));
+                        to_schedule.push((p, 4));
+                    } else if !want && on("triggered") {
+                        changes.push((p, b.with(s, "triggered", "false")));
+                    }
+                }
+                "bell" => {
+                    let want = c.powered(p, None);
+                    if want != on("powered") {
+                        changes.push((p, b.with(s, "powered", if want { "true" } else { "false" })));
+                        if want {
+                            let face = ["down", "up", "north", "south", "west", "east"].iter().position(|f| Some(*f) == b.get(s, "facing")).unwrap_or(2);
+                            bells.push((p, face as i32));
+                        }
+                    }
+                }
                 "piston" | "sticky_piston" => {
                     let facing = b.get(s, "facing").unwrap_or("north");
                     let want = c.powered(p, Some(facing));
@@ -517,6 +626,9 @@ fn update_area(server: &Arc<Server>, dim: Dimension, positions: &HashSet<BlockPo
     for p in primed {
         prime_tnt(server, dim, p, 80);
     }
+    for (p, face) in bells {
+        super::mechanisms::ring(server, dim, p, face);
+    }
     let mut moved = Vec::new();
     for (p, extend) in pistons {
         moved.extend(move_piston(server, dim, p, extend));
@@ -524,8 +636,13 @@ fn update_area(server: &Arc<Server>, dim: Dimension, positions: &HashSet<BlockPo
     changes.into_iter().map(|c| c.0).chain(moved).collect()
 }
 
-/// Scheduled tick: torches, repeaters and buttons.
+/// Scheduled tick: torches, repeaters, comparators, observers, buttons, droppers and
+/// dispensers, lecterns and composters.
 fn scheduled_tick(server: &Arc<Server>, dim: Dimension, pos: BlockPos) {
+    let mut fire = false;
+    let mut signal_changed = false;
+    let mut again = None;
+    let mut ready = false;
     let change = {
         let mut world = server.world(dim).lock().unwrap();
         let mut c = Ctx { world: &mut world };
@@ -543,6 +660,30 @@ fn scheduled_tick(server: &Arc<Server>, dim: Dimension, pos: BlockPos) {
                 (input != on("powered")).then(|| b.with(s, "powered", if input { "true" } else { "false" }))
             }
             n if n.ends_with("_button") && on("powered") => Some(b.with(s, "powered", "false")),
+            "comparator" => {
+                let out = c.comparator_output(pos, b, s);
+                if out != c.comparator_stored(pos) {
+                    c.world.set_block_entity(pos, crate::world::blockentity::BlockEntity::Comparator(out));
+                    signal_changed = true;
+                }
+                ((out > 0) != on("powered")).then(|| b.with(s, "powered", if out > 0 { "true" } else { "false" }))
+            }
+            // A 2-tick pulse.
+            "observer" if on("powered") => Some(b.with(s, "powered", "false")),
+            "observer" => {
+                again = Some(2);
+                Some(b.with(s, "powered", "true"))
+            }
+            "dispenser" | "dropper" => {
+                fire = true;
+                None
+            }
+            "lectern" if on("powered") => Some(b.with(s, "powered", "false")),
+            "composter" => {
+                let next = super::mechanisms::composter_ready(s);
+                ready = next.is_some();
+                next
+            }
             _ => None,
         }
     };
@@ -550,6 +691,17 @@ fn scheduled_tick(server: &Arc<Server>, dim: Dimension, pos: BlockPos) {
         server.world(dim).lock().unwrap().set_block(pos, s);
         server.broadcast_dim(dim, &super::blocks::block_change(pos, s), None);
         changed(server, dim, pos);
+    } else if signal_changed {
+        changed(server, dim, pos);
+    }
+    if ready {
+        super::sound::at(server, dim, [pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5], "block.composter.ready", super::sound::BLOCK, 1.0, 1.0);
+    }
+    if let Some(d) = again {
+        schedule(server, dim, pos, d);
+    }
+    if fire {
+        super::hoppers::dispense(server, dim, pos);
     }
 }
 
@@ -637,11 +789,16 @@ pub fn prime_tnt(server: &Arc<Server>, dim: Dimension, pos: BlockPos, fuse: i32)
         world.set_block(pos, 0);
     }
     server.broadcast_dim(dim, &super::blocks::block_change(pos, 0), None);
+    spawn_tnt(server, dim, [pos.x as f64 + 0.5, pos.y as f64, pos.z as f64 + 0.5], fuse);
+}
+
+/// Primed TNT at a position (from a TNT block or a dispenser).
+pub fn spawn_tnt(server: &Server, dim: Dimension, at: [f64; 3], fuse: i32) {
     let a = super::entities::random() as f64 * std::f64::consts::TAU;
     let t = Tnt {
         eid: server.next_entity_id(),
         dim,
-        pos: [pos.x as f64 + 0.5, pos.y as f64, pos.z as f64 + 0.5],
+        pos: at,
         vel: [-a.sin() * 0.02, 0.2, -a.cos() * 0.02],
         fuse,
         on_ground: false,

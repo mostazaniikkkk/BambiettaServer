@@ -1,5 +1,5 @@
-//! Chests, barrels and furnaces: opening, sharing contents between players, smelting and
-//! animating the chest lid.
+//! Chests, barrels, hoppers, dispensers and furnaces (also smokers and blast furnaces):
+//! opening, sharing contents between players, smelting and animating the chest lid.
 
 use super::inventory::WindowKind;
 use super::{entities, experience, Player, Server};
@@ -11,8 +11,22 @@ use crate::world::blockentity::{BlockEntity, Brewing, Furnace};
 use crate::world::Dimension;
 use std::sync::Arc;
 
-/// Smelting time of an item in a regular furnace (10 s).
+/// Smelting time of an item in a regular furnace (10 s); smokers and blast furnaces take half.
 const COOK_TIME: i32 = 200;
+
+fn cook_time(kind: u8) -> i32 {
+    if kind == 0 { COOK_TIME } else { COOK_TIME / 2 }
+}
+
+/// What a furnace of this kind smelts: smokers only food, blast furnaces only ores.
+pub fn smelts(kind: u8, input: &str) -> Option<(String, f32)> {
+    let ok = match kind {
+        1 => matches!(input, "beef" | "porkchop" | "chicken" | "mutton" | "rabbit" | "cod" | "salmon" | "potato" | "kelp"),
+        2 => input.ends_with("_ore") || input.starts_with("raw_") || input == "ancient_debris",
+        _ => true,
+    };
+    ok.then(|| gameplay::smelt(input)).flatten()
+}
 
 fn clockwise(d: &str) -> &'static str {
     match d {
@@ -98,6 +112,11 @@ pub fn open(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos, block: &B
         "chest" | "trapped_chest" => (WindowKind::Chest(3), "Cofre"),
         "barrel" => (WindowKind::Chest(3), "Barril"),
         "furnace" => (WindowKind::Furnace, "Horno"),
+        "smoker" => (WindowKind::Furnace, "Ahumador"),
+        "blast_furnace" => (WindowKind::Furnace, "Alto horno"),
+        "hopper" => (WindowKind::Hopper, "Tolva"),
+        "dispenser" => (WindowKind::Dispenser, "Dispensador"),
+        "dropper" => (WindowKind::Dispenser, "Soltador"),
         "brewing_stand" => (WindowKind::Brewing, "Soporte para pociones"),
         n if super::stations::open(server, player, pos, n) => return true,
         "enchanting_table" => {
@@ -130,7 +149,12 @@ pub fn open(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos, block: &B
     };
     {
         let mut st = player.state.lock().unwrap();
-        for p in st.inv.open(kind, pos, slots, title) {
+        let menu = match block.name.as_str() {
+            "smoker" => Some(super::inventory::MENU_SMOKER),
+            "blast_furnace" => Some(super::inventory::MENU_BLAST_FURNACE),
+            _ => None,
+        };
+        for p in st.inv.open_menu(kind, menu, pos, slots, title) {
             player.send(p);
         }
         if let Some(t) = furnace {
@@ -251,6 +275,40 @@ pub fn after_click(server: &Arc<Server>, player: &Arc<Player>, smelted_taken: i3
             }
         }
     }
+    // Comparators reading the container.
+    super::redstone::changed(server, dim, pos);
+    if let Some(p2) = pos2 {
+        super::redstone::changed(server, dim, p2);
+    }
+}
+
+/// The contents changed from outside a window (hoppers, dispensers): whoever has it open
+/// sees the new contents, and comparators read it again.
+pub fn sync(server: &Server, dim: Dimension, pos: BlockPos) {
+    let slots = match server.world(dim).lock().unwrap().peek_block_entity(pos) {
+        Some(BlockEntity::Container(items)) => items.clone(),
+        Some(BlockEntity::Furnace(f)) => f.items.clone(),
+        Some(BlockEntity::Brewing(b)) => b.items.clone(),
+        _ => return,
+    };
+    for v in viewers(server, dim, pos) {
+        let mut st = v.state.lock().unwrap();
+        // The second half of a double chest comes after the first 27 slots.
+        let at = st.inv.window.as_ref().map_or(pos, |w| w.pos);
+        let p = if at == pos {
+            st.inv.refresh_shared(pos, &slots)
+        } else {
+            let mut all = st.inv.window.as_ref().map(|w| w.slots.clone()).unwrap_or_default();
+            if all.len() >= 27 + slots.len() {
+                all[27..27 + slots.len()].clone_from_slice(&slots);
+            }
+            st.inv.refresh_shared(at, &all)
+        };
+        if let Some(p) = p {
+            v.send(p);
+        }
+    }
+    super::redstone::changed(server, dim, pos);
 }
 
 /// When breaking the block: closes open windows and returns the contents to drop.
@@ -338,7 +396,7 @@ impl Ticking {
                 inv.property_packet(0, f.burn as i16),
                 inv.property_packet(1, f.burn_total as i16),
                 inv.property_packet(2, f.cook as i16),
-                inv.property_packet(3, COOK_TIME as i16),
+                inv.property_packet(3, cook_time(f.kind) as i16),
             ],
             Ticking::Brewing(b) => vec![inv.property_packet(0, b.brew_time as i16), inv.property_packet(1, b.fuel as i16)],
         }
@@ -349,7 +407,7 @@ impl Ticking {
 fn step_furnace(f: &mut Furnace) {
     let reg = data::get();
     let name_of = |s: &Slot| s.as_ref().map(|i| i.name());
-    let result = name_of(&f.items[0]).and_then(gameplay::smelt);
+    let result = name_of(&f.items[0]).and_then(|n| smelts(f.kind, n));
     let can_smelt = match (&result, &f.items[2]) {
         (Some(_), None) => true,
         (Some((name, _)), Some(out)) => out.name() == name && out.count < out.max_stack(),
@@ -359,7 +417,8 @@ fn step_furnace(f: &mut Furnace) {
         f.burn -= 1;
     }
     if f.burn == 0 && can_smelt {
-        let fuel = name_of(&f.items[1]).map_or(0, gameplay::fuel_ticks);
+        // Smokers and blast furnaces burn their fuel twice as fast.
+        let fuel = name_of(&f.items[1]).map_or(0, gameplay::fuel_ticks) / if f.kind == 0 { 1 } else { 2 };
         if fuel > 0 {
             f.burn = fuel;
             f.burn_total = fuel;
@@ -375,7 +434,7 @@ fn step_furnace(f: &mut Furnace) {
     }
     if f.burn > 0 && can_smelt {
         f.cook += 1;
-        if f.cook >= COOK_TIME {
+        if f.cook >= cook_time(f.kind) {
             f.cook = 0;
             let (name, xp) = result.unwrap();
             match &mut f.items[2] {
@@ -406,6 +465,7 @@ fn tick_furnaces_in(server: &Arc<Server>, dim: Dimension) {
     let reg = data::get();
     let mut changed: Vec<(BlockPos, Ticking, Option<u16>)> = Vec::new();
     let mut brewed = Vec::new();
+    let mut contents_changed = Vec::new();
     {
         let mut world = server.world(dim).lock().unwrap();
         for pos in world.loaded_furnaces() {
@@ -415,6 +475,9 @@ fn tick_furnaces_in(server: &Arc<Server>, dim: Dimension) {
                     step_furnace(&mut next);
                     if next == f {
                         continue;
+                    }
+                    if next.items != f.items {
+                        contents_changed.push(pos);
                     }
                     // The block turns on/off (`lit` property).
                     let new_state = if (f.burn > 0) != (next.burn > 0) {
@@ -436,6 +499,9 @@ fn tick_furnaces_in(server: &Arc<Server>, dim: Dimension) {
                     if next == b {
                         continue;
                     }
+                    if next.items != b.items {
+                        contents_changed.push(pos);
+                    }
                     // Bottles are shown on the stand (has_bottle_0..2).
                     let state = world.get_block(pos);
                     let block = reg.block_of_state(state);
@@ -453,6 +519,9 @@ fn tick_furnaces_in(server: &Arc<Server>, dim: Dimension) {
                 _ => {}
             }
         }
+    }
+    for pos in contents_changed {
+        super::redstone::changed(server, dim, pos);
     }
     for pos in brewed {
         let mut p = packet(id::play::WORLD_EVENT);
@@ -495,6 +564,15 @@ mod tests {
         // The tick in which it ignites does not consume fuel (like vanilla).
         assert_eq!(f.burn, 1600 - COOK_TIME + 1);
         assert!((f.xp - 0.7).abs() < 1e-6);
+        // A smoker takes half the time but does not smelt ores.
+        let mut s = Furnace { items: vec![item("beef", 1), item("coal", 1), None], ..Furnace::new(1) };
+        for _ in 0..COOK_TIME / 2 {
+            step_furnace(&mut s);
+        }
+        assert_eq!(s.items[2].as_ref().map(|i| i.name()), Some("cooked_beef"));
+        let mut s = Furnace { items: vec![item("raw_iron", 1), item("coal", 1), None], ..Furnace::new(1) };
+        step_furnace(&mut s);
+        assert_eq!((s.burn, s.cook), (0, 0), "el ahumador no funde hierro");
         // Without fuel it does not progress.
         let mut g = Furnace { items: vec![item("sand", 1), None, None], ..Default::default() };
         step_furnace(&mut g);

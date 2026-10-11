@@ -175,6 +175,13 @@ fn item_to_nbt(slot: usize, item: &ItemStack) -> Nbt {
     c
 }
 
+/// An item stored on its own (a jukebox record, a lectern book).
+fn single_item(n: Option<&Nbt>) -> Slot {
+    let n = n?;
+    let id = data::get().item_id(n.get_str("id")?)?;
+    Some(ItemStack { id, count: n.get_i64("Count").unwrap_or(1).max(1) as i8, nbt: n.get("tag").cloned().map(Box::new) })
+}
+
 fn items_from_nbt(list: Option<&Nbt>, len: usize) -> Vec<Slot> {
     let reg = data::get();
     let mut out = vec![None; len];
@@ -220,7 +227,7 @@ fn block_entity_to_nbt(pos: BlockPos, be: &BlockEntity, block: &str) -> Nbt {
             .with("Items", items(&f.items))
             .with("BurnTime", Nbt::Short(f.burn as i16))
             .with("CookTime", Nbt::Short(f.cook as i16))
-            .with("CookTimeTotal", Nbt::Short(200))
+            .with("CookTimeTotal", Nbt::Short(if f.kind == 0 { 200 } else { 100 }))
             .with("bambietta_burn_total", Nbt::Int(f.burn_total))
             .with("bambietta_xp", Nbt::Float(f.xp)),
         BlockEntity::Brewing(b) => base
@@ -228,6 +235,15 @@ fn block_entity_to_nbt(pos: BlockPos, be: &BlockEntity, block: &str) -> Nbt {
             .with("BrewTime", Nbt::Short(b.brew_time as i16))
             .with("Fuel", Nbt::Byte(b.fuel as i8)),
         BlockEntity::Hive { bees } => base.with("Bees", Nbt::List(vec![])).with("bambietta_bees", Nbt::Int(*bees as i32)),
+        BlockEntity::Jukebox(record) => match record {
+            Some(r) => base.with("RecordItem", item_to_nbt(0, r)),
+            None => base,
+        },
+        BlockEntity::Lectern { book, page } => match book {
+            Some(b) => base.with("Book", item_to_nbt(0, b)).with("Page", Nbt::Int(*page)),
+            None => base,
+        },
+        BlockEntity::Comparator(out) => base.with("OutputSignal", Nbt::Int(*out as i32)),
         BlockEntity::Spawner { delay, .. } => {
             let mut n = base.with("Delay", Nbt::Short(*delay as i16));
             if let Some(Nbt::Compound(fields)) = be.client_nbt() {
@@ -254,7 +270,12 @@ fn block_entity_from_nbt(n: &Nbt) -> Option<(BlockPos, BlockEntity)> {
     let id = n.get_str("id")?.trim_start_matches("minecraft:");
     let be = match id {
         "chest" | "trapped_chest" | "barrel" => BlockEntity::Container(items_from_nbt(n.get("Items"), 27)),
-        "furnace" => {
+        "hopper" => BlockEntity::Container(items_from_nbt(n.get("Items"), 5)),
+        "dispenser" | "dropper" => BlockEntity::Container(items_from_nbt(n.get("Items"), 9)),
+        "jukebox" => BlockEntity::Jukebox(single_item(n.get("RecordItem"))),
+        "lectern" => BlockEntity::Lectern { book: single_item(n.get("Book")), page: n.get_i64("Page").unwrap_or(0) as i32 },
+        "comparator" => BlockEntity::Comparator(n.get_i64("OutputSignal").unwrap_or(0).clamp(0, 15) as u8),
+        "furnace" | "smoker" | "blast_furnace" => {
             let burn = n.get_i64("BurnTime").unwrap_or(0) as i32;
             BlockEntity::Furnace(Furnace {
                 items: items_from_nbt(n.get("Items"), 3),
@@ -265,6 +286,7 @@ fn block_entity_from_nbt(n: &Nbt) -> Option<(BlockPos, BlockEntity)> {
                     Some(Nbt::Float(f)) => *f,
                     _ => 0.0,
                 },
+                kind: Furnace::kind_of(id).unwrap_or(0),
             })
         }
         "brewing_stand" => BlockEntity::Brewing(Brewing {

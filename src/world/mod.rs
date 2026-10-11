@@ -94,6 +94,8 @@ pub struct World {
     dir: PathBuf,
     /// Unload rounds (to know which chunks are still in use).
     epoch: u64,
+    /// Observers whose watched block changed (redstone picks them up every tick).
+    pub observer_hits: Vec<BlockPos>,
 }
 
 /// Loads a chunk from disk or generates it. Needs no access to the loaded chunks.
@@ -135,7 +137,7 @@ impl World {
         let dir = PathBuf::from(&cfg.world_folder);
         std::fs::create_dir_all(dir.join(dim.folder()).join("region"))?;
         let source = Arc::new(ChunkSource { generator: Generator::for_dimension(dim, &cfg.generation), dir: dir.clone(), dim });
-        Ok(Self { dim, chunks: HashMap::new(), source, dir, epoch: 0 })
+        Ok(Self { dim, chunks: HashMap::new(), source, dir, epoch: 0, observer_hits: Vec::new() })
     }
 
     /// Flat world in a temporary folder (tests).
@@ -276,7 +278,31 @@ impl World {
 
     /// Changes a block and returns the previous state.
     pub fn set_block(&mut self, p: BlockPos, state: u16) -> u16 {
-        self.chunk(p.x >> 4, p.z >> 4).set((p.x & 15) as usize, p.y, (p.z & 15) as usize, state)
+        let old = self.chunk(p.x >> 4, p.z >> 4).set((p.x & 15) as usize, p.y, (p.z & 15) as usize, state);
+        if old != state {
+            self.notify_observers(p);
+        }
+        old
+    }
+
+    /// Block state if its chunk is loaded (never loads or generates one).
+    pub fn peek_block(&self, p: BlockPos) -> Option<u16> {
+        let c = self.chunks.get(&(p.x >> 4, p.z >> 4))?;
+        self.dim.in_bounds(p.y).then(|| c.get((p.x & 15) as usize, p.y, (p.z & 15) as usize))
+    }
+
+    /// An observer looking at `p` from a neighboring block notices the change.
+    fn notify_observers(&mut self, p: BlockPos) {
+        static OBSERVER: std::sync::OnceLock<Option<(u16, u16)>> = std::sync::OnceLock::new();
+        let Some((lo, hi)) = *OBSERVER.get_or_init(|| crate::data::get().block("observer").map(|b| (b.min_state, b.max_state))) else { return };
+        // (direction the observer must face, where it is relative to p)
+        for (d, dx, dy, dz) in [("up", 0, -1, 0), ("down", 0, 1, 0), ("south", 0, 0, -1), ("north", 0, 0, 1), ("east", -1, 0, 0), ("west", 1, 0, 0)] {
+            let q = BlockPos::new(p.x + dx, p.y + dy, p.z + dz);
+            let Some(s) = self.peek_block(q) else { continue };
+            if (lo..=hi).contains(&s) && crate::data::get().block_of_state(s).get(s, "facing") == Some(d) {
+                self.observer_hits.push(q);
+            }
+        }
     }
 
     /// Spawn point: the solid ground closest to (0, 0).
@@ -456,6 +482,26 @@ impl World {
             c.dirty = true;
         }
         be
+    }
+
+    /// Block entity without marking its chunk for saving (reading only).
+    pub fn peek_block_entity(&mut self, p: BlockPos) -> Option<&blockentity::BlockEntity> {
+        self.chunk(p.x >> 4, p.z >> 4).block_entities.get(&p)
+    }
+
+    /// Loaded containers whose block is one of `names` (hoppers...).
+    pub fn loaded_containers(&self, names: &[&str]) -> Vec<BlockPos> {
+        let reg = crate::data::get();
+        self.chunks
+            .values()
+            .flat_map(|c| {
+                c.block_entities
+                    .iter()
+                    .filter(|(_, be)| matches!(be, blockentity::BlockEntity::Container(_)))
+                    .filter(|(p, _)| names.contains(&reg.block_of_state(c.get((p.x & 15) as usize, p.y, (p.z & 15) as usize)).name.as_str()))
+                    .map(|(p, _)| *p)
+            })
+            .collect()
     }
 
     /// Positions of the furnaces and brewing stands loaded in memory.

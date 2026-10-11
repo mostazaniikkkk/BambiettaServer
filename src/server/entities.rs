@@ -89,6 +89,29 @@ pub fn spawn(server: &Server, dim: Dimension, pos: [f64; 3], vel: [f64; 3], item
     server.items.lock().unwrap().insert(e.eid, e);
 }
 
+/// Takes dropped items lying inside the box (a hopper sucking them in): `take` says how many
+/// of each stack it can hold. Returns whether it took anything.
+pub fn take_in_box(server: &Server, dim: Dimension, min: [f64; 3], max: [f64; 3], mut take: impl FnMut(&ItemStack) -> i8) -> bool {
+    let mut items = server.items.lock().unwrap();
+    let inside: Vec<i32> = items.values().filter(|e| e.dim == dim && (0..3).all(|i| e.pos[i] >= min[i] && e.pos[i] <= max[i])).map(|e| e.eid).collect();
+    let mut took = false;
+    for eid in inside {
+        let Some(e) = items.get_mut(&eid) else { continue };
+        let n = take(&e.item).min(e.item.count);
+        if n <= 0 {
+            continue;
+        }
+        took = true;
+        e.item.count -= n;
+        if e.item.count <= 0 {
+            items.remove(&eid);
+        } else {
+            server.broadcast_tracked(eid, &metadata(e), true);
+        }
+    }
+    took
+}
+
 /// Drops a broken block's loot at its center.
 pub fn drop_at_block(server: &Server, dim: Dimension, x: i32, y: i32, z: i32, item: ItemStack) {
     let pos = [x as f64 + 0.5 + (random() as f64 - 0.5) * 0.5, y as f64 + 0.25, z as f64 + 0.5 + (random() as f64 - 0.5) * 0.5];

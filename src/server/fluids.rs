@@ -346,6 +346,40 @@ pub fn raycast(world: &mut World, eye: [f64; 3], yaw: f32, pitch: f32, sources_o
 }
 
 /// Uses a bucket (empty: pick up a source; full: pour). Returns whether it was a bucket.
+/// A bucket used on a block without a player (dispensers): an empty one picks up a source,
+/// a full one pours it if the spot is free. Returns the bucket it leaves.
+pub fn bucket_at(server: &Server, dim: Dimension, p: BlockPos, name: &str) -> Option<&'static str> {
+    let mut changes = Vec::new();
+    let mut follow = Vec::new();
+    let result = {
+        let mut world = server.world(dim).lock().unwrap();
+        match name {
+            "bucket" => match fluid_at(&mut world, p) {
+                Some((k, 0)) => {
+                    set(&mut world, p, 0, &mut changes, &mut follow);
+                    Some(if k == Kind::Water { "water_bucket" } else { "lava_bucket" })
+                }
+                _ => None,
+            },
+            "water_bucket" if dim == Dimension::Nether => Some("bucket"),
+            "water_bucket" | "lava_bucket" if passable(&mut world, p) || fluid_at(&mut world, p).is_some_and(|f| f.1 > 0) => {
+                let kind = if name == "water_bucket" { Kind::Water } else { Kind::Lava };
+                set(&mut world, p, state_for(kind, 0), &mut changes, &mut follow);
+                follow.push((p, kind.delay(dim)));
+                Some("bucket")
+            }
+            _ => None,
+        }
+    };
+    for (q, s) in changes {
+        server.broadcast_dim(dim, &block_change(q, s), None);
+    }
+    for (q, d) in follow {
+        schedule(server, dim, q, d);
+    }
+    result
+}
+
 pub fn use_bucket(server: &Arc<Server>, player: &Arc<Player>, hand: i32) -> bool {
     let reg = data::get();
     let (item, eye, yaw, pitch, game_mode) = {

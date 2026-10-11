@@ -91,17 +91,6 @@ chmod +x bambietta-server && ./bambietta-server
 On first run it creates `config.json` and the world folder in the directory it is run from. The
 game data is embedded in the executable.
 
-## Behind an HTTP tunnel (Cloudflare Tunnel, ngrok...)
-
-HTTP tunnels only carry HTTP and WebSocket, so web clients connect with `wss://your-host`
-directly. Vanilla Minecraft speaks raw TCP; run the bridge on the player's machine and connect
-Minecraft to `localhost:25565`:
-
-```sh
-cd tools/smoke && npm install
-node ws-bridge.mjs wss://your-host 25565
-```
-
 ## Configuration (`config.json`)
 
 | Key | Default | Description |

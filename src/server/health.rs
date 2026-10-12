@@ -39,7 +39,7 @@ impl Attacker {
 
 /// Damage a shield can block (if it comes from the front).
 fn blockable(kind: &str) -> bool {
-    matches!(kind, "player_attack" | "mob_attack" | "arrow" | "trident" | "mob_projectile" | "fireball" | "explosion" | "player_explosion")
+    matches!(kind, "player_attack" | "mob_attack" | "arrow" | "trident" | "mob_projectile" | "fireball" | "explosion" | "player_explosion" | "wither_skull" | "thrown")
 }
 
 /// Entity status that plays the break animation of the item in the slot (47 main hand ... 52 feet).
@@ -110,7 +110,7 @@ pub fn set_on_fire(server: &Server, player: &Player, ticks: i32) {
 
 /// Damage reduced by armor (the rest ignores it: fall, starvation, void, drowning...).
 fn armor_applies(kind: &str) -> bool {
-    matches!(kind, "player_attack" | "mob_attack" | "mob_attack_no_aggro" | "arrow" | "mob_projectile" | "explosion" | "player_explosion" | "generic" | "cactus" | "thorns" | "sting" | "falling_block" | "trident")
+    matches!(kind, "player_attack" | "mob_attack" | "mob_attack_no_aggro" | "arrow" | "mob_projectile" | "explosion" | "player_explosion" | "generic" | "cactus" | "thorns" | "sting" | "falling_block" | "trident" | "wither_skull" | "thrown")
 }
 
 /// Reduction from armor, toughness and Protection enchantments (vanilla formulas).
@@ -379,6 +379,8 @@ pub async fn respawn(server: &Arc<Server>, player: &Arc<Player>) {
     super::effects::resend(player);
     super::weather::send_state(server, player);
     super::border::send_state(server, player);
+    super::leads::send_knots(server, player);
+    super::frames::send_all(player);
     let (inv, xp) = {
         let mut st = player.state.lock().unwrap();
         (st.inv.window_items(), super::experience::packet_for(&st))
@@ -482,6 +484,7 @@ fn finish_eating(player: &Player, st: &mut super::PlayerState, hand: i32) -> Opt
 /// Survival tick for a player (20 per second).
 pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
     super::portals::tick_player(server, player);
+    super::gateways::check(server, player);
     super::effects::tick(server, player);
     let mut leftovers = Vec::new();
     let mut drop_parrot = false;

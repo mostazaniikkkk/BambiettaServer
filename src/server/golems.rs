@@ -135,6 +135,26 @@ pub fn village_watch(server: &Arc<Server>, seen: &[Seen]) {
 /// the blocks become an iron golem.
 pub fn try_build(server: &Arc<Server>, dim: Dimension, head: BlockPos) -> bool {
     let reg = data::get();
+    // Two snow blocks under it: a snow golem.
+    let snowman = {
+        let mut world = server.world(dim).lock().unwrap();
+        let a = BlockPos::new(head.x, head.y - 1, head.z);
+        let b = BlockPos::new(head.x, head.y - 2, head.z);
+        let snow = |world: &mut World, p: BlockPos| reg.block_of_state(world.get_block(p)).name == "snow_block";
+        (snow(&mut world, a) && snow(&mut world, b)).then(|| {
+            for c in [head, a, b] {
+                world.set_block(c, 0);
+            }
+            b
+        })
+    };
+    if let Some(b) = snowman {
+        for c in [head, BlockPos::new(head.x, head.y - 1, head.z), b] {
+            server.broadcast_dim(dim, &super::blocks::block_change(c, 0), None);
+        }
+        mobs::spawn(server, dim, MobKind::SnowGolem, [b.x as f64 + 0.5, b.y as f64, b.z as f64 + 0.5]);
+        return true;
+    }
     let found = {
         let mut world = server.world(dim).lock().unwrap();
         let name = |world: &mut World, p: BlockPos| reg.block_of_state(world.get_block(p)).name.clone();

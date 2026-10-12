@@ -299,6 +299,7 @@ pub fn died(server: &Arc<Server>, m: &Mob) {
         server.broadcast_dim(Dimension::End, &super::blocks::block_change(p, s), None);
     }
     super::sound::at(server, Dimension::End, PERCH, "block.end_portal.spawn", super::sound::BLOCK, 1.0, 1.0);
+    super::gateways::spawn_next(server);
     server.broadcast_message("§d¡El dragón del End ha sido derrotado!");
     tracing::info!("el dragón del End murió");
 }
@@ -325,6 +326,25 @@ pub fn tick_fight(server: &Arc<Server>, seen: &[Seen], age: i64) {
         return;
     }
     if killed {
+        // Four End crystals on the edges of the exit portal bring the dragon back.
+        let placed: Vec<i32> = {
+            let map = server.mobs.lock().unwrap();
+            super::gateways::RESPAWN_SPOTS
+                .iter()
+                .filter_map(|spot| map.values().find(|m| m.kind == MobKind::EndCrystal && m.dim == Dimension::End && super::mobs::dist2(&m.pos, spot) < 1.5 * 1.5).map(|m| m.eid))
+                .collect()
+        };
+        if placed.len() == 4 {
+            for e in placed {
+                super::mobs::remove(server, e);
+            }
+            let mut f = server.dragon.lock().unwrap();
+            f.killed = false;
+            f.portal_checked = false;
+            drop(f);
+            server.broadcast_message("§5El dragón del End ha vuelto...");
+            return;
+        }
         let check = !std::mem::replace(&mut server.dragon.lock().unwrap().portal_checked, true);
         if check {
             let changes = exit_portal(&mut server.world(Dimension::End).lock().unwrap(), true);

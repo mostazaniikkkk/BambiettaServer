@@ -25,6 +25,11 @@ pub enum ProjectileKind {
     XpBottle,
     Trident,
     LlamaSpit,
+    Snowball,
+    Egg,
+    /// Homes in on its target; Levitation.
+    ShulkerBullet,
+    WitherSkull,
 }
 
 impl ProjectileKind {
@@ -39,6 +44,10 @@ impl ProjectileKind {
             ProjectileKind::XpBottle => "experience_bottle",
             ProjectileKind::Trident => "trident",
             ProjectileKind::LlamaSpit => "llama_spit",
+            ProjectileKind::Snowball => "snowball",
+            ProjectileKind::Egg => "egg",
+            ProjectileKind::ShulkerBullet => "shulker_bullet",
+            ProjectileKind::WitherSkull => "wither_skull",
         }
     }
 
@@ -46,7 +55,7 @@ impl ProjectileKind {
     fn physics(&self) -> (f64, f64) {
         match self {
             ProjectileKind::Arrow | ProjectileKind::Trident => (0.05, 0.99),
-            ProjectileKind::SmallFireball | ProjectileKind::Fireball | ProjectileKind::DragonFireball => (0.0, 1.0),
+            ProjectileKind::SmallFireball | ProjectileKind::Fireball | ProjectileKind::DragonFireball | ProjectileKind::WitherSkull | ProjectileKind::ShulkerBullet => (0.0, 1.0),
             ProjectileKind::XpBottle => (0.07, 0.99),
             _ => (0.03, 0.99),
         }
@@ -59,6 +68,8 @@ impl ProjectileKind {
             ProjectileKind::EnderPearl => reg.item_id("ender_pearl").map(|i| ItemStack::new(i, 1)),
             ProjectileKind::XpBottle => reg.item_id("experience_bottle").map(|i| ItemStack::new(i, 1)),
             ProjectileKind::SmallFireball | ProjectileKind::Fireball => reg.item_id("fire_charge").map(|i| ItemStack::new(i, 1)),
+            ProjectileKind::Snowball => reg.item_id("snowball").map(|i| ItemStack::new(i, 1)),
+            ProjectileKind::Egg => reg.item_id("egg").map(|i| ItemStack::new(i, 1)),
             _ => None,
         }
     }
@@ -77,6 +88,8 @@ pub struct Projectile {
     stuck: bool,
     /// Arrows and tridents launched by players (damage, enchantments, pickup).
     pub arrow: Option<Box<ArrowData>>,
+    /// What it homes in on (shulker bullets).
+    pub target: Option<i32>,
 }
 
 /// Data for a player's arrow or trident.
@@ -161,9 +174,18 @@ pub fn shoot(server: &Server, dim: Dimension, kind: ProjectileKind, shooter: i32
 
 /// A player's arrow or trident.
 pub fn shoot_with(server: &Server, dim: Dimension, kind: ProjectileKind, shooter: i32, from: [f64; 3], vel: [f64; 3], arrow: Option<ArrowData>) -> i32 {
-    let a = Projectile { eid: server.next_entity_id(), dim, kind, shooter, pos: from, vel, age: 0, stuck: false, arrow: arrow.map(Box::new) };
+    let a = Projectile { eid: server.next_entity_id(), dim, kind, shooter, pos: from, vel, age: 0, stuck: false, arrow: arrow.map(Box::new), target: None };
     let eid = a.eid;
     server.projectiles.lock().unwrap().push(a);
+    eid
+}
+
+/// A projectile that homes in on `target` (a shulker bullet).
+pub fn shoot_at(server: &Server, dim: Dimension, kind: ProjectileKind, shooter: i32, from: [f64; 3], vel: [f64; 3], target: i32) -> i32 {
+    let eid = shoot(server, dim, kind, shooter, from, vel);
+    if let Some(p) = server.projectiles.lock().unwrap().iter_mut().find(|p| p.eid == eid) {
+        p.target = Some(target);
+    }
     eid
 }
 
@@ -184,6 +206,8 @@ pub fn throw_held(server: &Arc<Server>, player: &Arc<Player>, hand: i32) -> bool
         "splash_potion" | "lingering_potion" => (ProjectileKind::Potion(item.with_count(1)), 0.5, -20.0, "entity.splash_potion.throw"),
         "ender_pearl" => (ProjectileKind::EnderPearl, 1.5, 0.0, "entity.ender_pearl.throw"),
         "experience_bottle" => (ProjectileKind::XpBottle, 0.7, -20.0, "entity.experience_bottle.throw"),
+        "snowball" => (ProjectileKind::Snowball, 1.5, 0.0, "entity.snowball.throw"),
+        "egg" => (ProjectileKind::Egg, 1.5, 0.0, "entity.egg.throw"),
         _ => return false,
     };
     {
@@ -347,6 +371,25 @@ pub fn tick(server: &Arc<Server>) {
                     }
                 }
                 return true;
+            }
+            // A shulker bullet steers towards its target.
+            if let Some(t) = a.target {
+                let at = players
+                    .iter()
+                    .find(|s| s.player.eid == t && s.dim == a.dim && s.hittable)
+                    .map(|s| [s.pos[0], s.pos[1] + 0.9, s.pos[2]])
+                    .or_else(|| mob_boxes.iter().find(|(e, (d, _))| *e == t && *d == a.dim).map(|(_, (_, b))| [(b.min[0] + b.max[0]) / 2.0, (b.min[1] + b.max[1]) / 2.0, (b.min[2] + b.max[2]) / 2.0]));
+                match at {
+                    Some(at) => {
+                        let to = [at[0] - a.pos[0], at[1] - a.pos[1], at[2] - a.pos[2]];
+                        let l = (to[0] * to[0] + to[1] * to[1] + to[2] * to[2]).sqrt().max(1e-6);
+                        for i in 0..3 {
+                            a.vel[i] = a.vel[i] * 0.8 + to[i] / l * 0.15 * 0.2 * 5.0 * 0.2;
+                        }
+                    }
+                    None if a.age > 200 => return false,
+                    None => {}
+                }
             }
             let next = [a.pos[0] + a.vel[0], a.pos[1] + a.vel[1], a.pos[2] + a.vel[2]];
             // Does it hit a player or a mob? (not the shooter during the first ticks)
@@ -529,6 +572,45 @@ fn impact(server: &Arc<Server>, a: &Projectile, hit: Hit, at: [f64; 3]) {
             None => hurt((speed * 2.0).ceil() as f32, "arrow", false),
         },
         ProjectileKind::LlamaSpit => hurt(1.0, "mob_projectile", false),
+        ProjectileKind::Snowball => {
+            // Harmless, except to blazes.
+            let blaze = matches!(&hit, Hit::Mob(e) if mobs::kind_of(server, *e) == Some(mobs::MobKind::Blaze));
+            if !matches!(hit, Hit::Block | Hit::Sound(_)) {
+                hurt(if blaze { 3.0 } else { 0.01 }, "thrown", false);
+            }
+        }
+        ProjectileKind::Egg => {
+            if !matches!(hit, Hit::Sound(_)) {
+                if !matches!(hit, Hit::Block) {
+                    hurt(0.01, "thrown", false);
+                }
+                // One in eight hatches a chick (and now and then four).
+                if entities::random() < 0.125 {
+                    let n = if entities::random() < 1.0 / 32.0 { 4 } else { 1 };
+                    for _ in 0..n {
+                        let eid = mobs::spawn(server, a.dim, mobs::MobKind::Chicken, at);
+                        if let Some(m) = server.mobs.lock().unwrap().get_mut(&eid) {
+                            m.grow = super::animals::BABY;
+                        }
+                    }
+                }
+            }
+        }
+        ProjectileKind::ShulkerBullet => {
+            hurt(4.0, "mob_projectile", false);
+            if let Hit::Player(p) = &hit {
+                effects::add(server, p, "levitation", 0, 200, 1.0);
+            }
+            sound::at(server, a.dim, at, "entity.shulker_bullet.hit", sound::HOSTILE, 1.0, 1.0);
+        }
+        ProjectileKind::WitherSkull => {
+            hurt(8.0, "wither_skull", false);
+            if let Hit::Player(p) = &hit {
+                let secs = if server.config.difficulty >= 3 { 40 } else { 10 };
+                effects::add(server, p, "wither", 1, secs * 20, 1.0);
+            }
+            explosion::explode_ex(server, a.dim, at, 1.0, Some(by.clone()), false);
+        }
         ProjectileKind::Trident => {
             hurt(8.0, "trident", false);
             sound::at(server, a.dim, at, "item.trident.hit", sound::PLAYER, 1.0, 1.0);

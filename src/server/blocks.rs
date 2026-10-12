@@ -164,6 +164,10 @@ fn break_block(server: &Arc<Server>, player: &Player, pos: BlockPos, drops: bool
     // Chests and furnaces drop their contents (also in creative, like vanilla).
     let contents = super::containers::on_break(server, dim, pos);
     super::mechanisms::broken(server, dim, pos, &block.name);
+    if block.name.ends_with("_fence") {
+        super::leads::fence_broken(server, dim, pos);
+    }
+    super::frames::block_changed(server, dim, pos);
     set(server, dim, pos, 0);
     if block.name == "obsidian" || block.name == "nether_portal" {
         super::portals::break_portal_near(server, dim, pos);
@@ -305,6 +309,10 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         if super::mechanisms::interact(server, player, req.location, clicked_state, &item, req.hand, req.face, sneaking) {
             return;
         }
+        // Tying the animals on the lead to a fence.
+        if clicked.name.ends_with("_fence") && super::leads::tie(server, player, req.location) {
+            return;
+        }
         if super::containers::open(server, player, req.location, clicked) {
             return;
         }
@@ -358,6 +366,20 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         if !super::vehicles::place_minecart(server, player, req.location, req.hand) {
             reject("la vagoneta va sobre un raíl");
         }
+        return;
+    }
+    // End crystals go on obsidian or bedrock.
+    if stack.name() == "end_crystal" {
+        if matches!(clicked.name.as_str(), "obsidian" | "bedrock") && data::get().is_air(get(server, dim, req.location.offset(1))) {
+            let p = req.location;
+            super::mobs::spawn(server, dim, super::mobs::MobKind::EndCrystal, [p.x as f64 + 0.5, p.y as f64 + 1.0, p.z as f64 + 0.5]);
+            consume(player, game_mode, req.hand, &stack);
+        }
+        return;
+    }
+    // Item frames hang on block faces.
+    if matches!(stack.name(), "item_frame" | "glow_item_frame") && game_mode != 2 {
+        super::frames::place(server, player, req.location, req.face, req.hand);
         return;
     }
     // Spawn eggs.
@@ -519,6 +541,10 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
     }
     set(server, dim, target, state);
     // A pumpkin on top of a T of iron blocks: an iron golem.
+    if block.name == "wither_skeleton_skull" && super::wither::try_build(server, dim, target) {
+        consume(player, game_mode, req.hand, &stack);
+        return;
+    }
     if matches!(block.name.as_str(), "carved_pumpkin" | "jack_o_lantern") && super::golems::try_build(server, dim, target) {
         consume(player, game_mode, req.hand, &stack);
         return;

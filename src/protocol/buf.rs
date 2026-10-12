@@ -165,6 +165,17 @@ pub trait Writer {
             v >>= 7;
         }
     }
+    fn varlong(&mut self, v: i64) -> &mut Self {
+        let mut v = v as u64;
+        loop {
+            if v & !0x7f == 0 {
+                self.put(&[v as u8]);
+                return self;
+            }
+            self.put(&[(v as u8 & 0x7f) | 0x80]);
+            v >>= 7;
+        }
+    }
     fn string(&mut self, s: &str) -> &mut Self {
         self.varint(s.len() as i32);
         self.put(s.as_bytes());

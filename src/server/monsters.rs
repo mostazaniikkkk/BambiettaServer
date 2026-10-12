@@ -31,6 +31,7 @@ fn head_in_water(world: &mut World, m: &Mob) -> bool {
 
 /// Every tick, before the rest of the AI: conversions, Weakness wearing off, witches drinking.
 pub fn tick(world: &mut World, m: &mut Mob, actions: &mut Vec<Action>) {
+    super::creatures::zombify(m, actions);
     m.weak = m.weak.saturating_sub(1);
     m.resist = m.resist.saturating_sub(1);
     match m.kind {

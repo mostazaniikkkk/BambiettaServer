@@ -35,6 +35,8 @@ async fn main() -> Result<()> {
     let srv = server::Server::new(config.clone())?;
     server::mobs::load(&srv);
     server::raids::load(&srv);
+    server::leads::restore(&srv);
+    server::frames::load(&srv);
     server::vehicles::load(&srv);
     server::maps::load(&std::path::PathBuf::from(&config.world_folder));
 

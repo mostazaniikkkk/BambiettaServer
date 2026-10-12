@@ -24,7 +24,7 @@ const COMMANDS: &[Command] = &[
     Command { name: "gamemode", usage: "/gamemode <modo> [jugador]", help: "Cambiar modo de juego", op: true, run: gamemode },
     Command { name: "gm", usage: "/gm <0-3> [jugador]", help: "Alias de /gamemode", op: true, run: gamemode },
     Command { name: "tp", usage: "/tp <x y z> | <jugador> | <jugador> <destino>", help: "Teletransportar", op: true, run: tp },
-    Command { name: "locate", usage: "/locate <stronghold|dungeon|village|pyramid|outpost|fortress>", help: "Buscar la estructura más cercana", op: true, run: locate },
+    Command { name: "locate", usage: "/locate <stronghold|dungeon|village|pyramid|outpost|fortress|bastion|end_city|mineshaft|jungle_temple|shipwreck|ocean_ruin|ruined_portal|monument|ancient_city>", help: "Buscar la estructura más cercana", op: true, run: locate },
     Command { name: "gamerule", usage: "/gamerule <regla> [valor]", help: "Ver o cambiar una regla del juego", op: true, run: gamerule },
     Command { name: "worldborder", usage: "/worldborder <get|set|add|center|damage|warning> ...", help: "Borde del mundo", op: true, run: super::border::command },
     Command { name: "weather", usage: "/weather <clear|rain|thunder> [segundos]", help: "Cambiar el clima", op: true, run: weather },
@@ -196,7 +196,10 @@ fn tp(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
 
 fn locate(s: &Arc<Server>, p: &Arc<Player>, args: &str) -> Result<(), String> {
     let kind = args.split_whitespace().next().ok_or_default()?;
-    if !matches!(kind, "stronghold" | "dungeon" | "village" | "pyramid" | "outpost" | "fortress") {
+    if !matches!(
+        kind,
+        "stronghold" | "dungeon" | "village" | "pyramid" | "outpost" | "fortress" | "bastion" | "end_city" | "mineshaft" | "jungle_temple" | "shipwreck" | "ocean_ruin" | "ruined_portal" | "monument" | "ancient_city"
+    ) {
         return Err(format!("Estructura desconocida: {kind}"));
     }
     let (x, z) = {

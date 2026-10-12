@@ -12,7 +12,7 @@ use crate::protocol::{id, packet, Writer};
 use std::sync::Arc;
 
 pub fn is_horse(kind: MobKind) -> bool {
-    matches!(kind, MobKind::Horse | MobKind::Donkey | MobKind::Mule | MobKind::Llama)
+    matches!(kind, MobKind::Horse | MobKind::Donkey | MobKind::Mule | MobKind::Llama | MobKind::Camel)
 }
 
 /// Can carry a chest.
@@ -56,6 +56,10 @@ pub fn init(m: &mut Mob) {
             m.strength = 1 + (r() * 3.0) as i32 + i32::from(r() < 0.04) * 2;
             m.speed_attr = 0.175;
             m.jump_attr = 0.5;
+        }
+        MobKind::Camel => {
+            m.speed_attr = 0.09;
+            m.jump_attr = 0.42;
         }
         _ => {
             m.speed_attr = 0.175;
@@ -257,6 +261,8 @@ fn food_value(kind: MobKind, item: &str) -> Option<f32> {
         (MobKind::Llama, "wheat") => Some(2.0),
         (MobKind::Llama, "hay_block") => Some(10.0),
         (MobKind::Llama, _) => None,
+        (MobKind::Camel, "cactus") => Some(2.0),
+        (MobKind::Camel, _) => None,
         (_, "sugar") => Some(1.0),
         (_, "wheat") => Some(2.0),
         (_, "apple") => Some(3.0),
@@ -270,6 +276,7 @@ fn food_value(kind: MobKind, item: &str) -> Option<f32> {
 fn breeding_food(kind: MobKind, item: &str) -> bool {
     match kind {
         MobKind::Llama => item == "hay_block",
+        MobKind::Camel => item == "cactus",
         MobKind::Mule => false,
         _ => matches!(item, "golden_carrot" | "golden_apple" | "enchanted_golden_apple"),
     }

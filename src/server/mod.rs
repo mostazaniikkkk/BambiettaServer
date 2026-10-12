@@ -1,6 +1,14 @@
 //! Global server state and periodic tasks.
 
 pub mod admin;
+pub mod frames;
+pub mod gateways;
+pub mod sites;
+pub mod leads;
+pub mod creatures;
+pub mod guardians;
+pub mod warden;
+pub mod wither;
 pub mod raids;
 pub mod golems;
 pub mod horses;
@@ -396,6 +404,7 @@ impl Server {
         }
         mobs::save(self);
         raids::save(self);
+        frames::save(self);
         vehicles::save(self);
         maps::save();
         // Player views before locking the world (lock order: player -> world).

@@ -64,6 +64,8 @@ pub fn breeds(kind: MobKind) -> bool {
             | MobKind::Axolotl
             | MobKind::PolarBear
             | MobKind::Panda
+            | MobKind::Camel
+            | MobKind::Sniffer
     )
 }
 
@@ -84,6 +86,7 @@ pub fn is_food(kind: MobKind, item: &str) -> bool {
         MobKind::Frog => item == "slime_ball",
         MobKind::Axolotl => item == "tropical_fish_bucket",
         MobKind::Panda => item == "bamboo",
+        MobKind::Sniffer => item == "torchflower_seeds",
         _ => false,
     }
 }
@@ -434,7 +437,7 @@ pub fn breed(server: &Arc<Server>, dim: crate::world::Dimension, kind: MobKind, 
         }
     }
     // Turtles and frogs lay eggs instead (the mother goes off to lay them).
-    if matches!(kind, MobKind::Turtle | MobKind::Frog) {
+    if matches!(kind, MobKind::Turtle | MobKind::Frog | MobKind::Sniffer) {
         if let Some(m) = server.mobs.lock().unwrap().get_mut(&parents.0) {
             m.egg = true;
         }

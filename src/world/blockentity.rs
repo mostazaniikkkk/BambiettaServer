@@ -215,6 +215,7 @@ pub fn type_id(block: &str) -> Option<i32> {
         "brewing_stand" => 11,
         "enchanting_table" => 12,
         "end_portal" => 13,
+        "end_gateway" => 21,
         "beacon" => 14,
         "daylight_detector" => 16,
         "hopper" => 17,

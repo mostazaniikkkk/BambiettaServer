@@ -163,6 +163,8 @@ async fn join(server: &Arc<Server>, player: &Arc<Player>) -> bool {
     super::effects::resend(player);
     super::weather::send_state(server, player);
     super::border::send_state(server, player);
+    super::leads::send_knots(server, player);
+    super::frames::send_all(player);
     super::advancements::send_all(player);
     server.broadcast_message(&format!("§e{} entró al juego", player.name));
     player.message("§dBienvenido a Bambietta§7 · usa §e/help");

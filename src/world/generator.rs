@@ -91,12 +91,18 @@ impl Generator {
     /// of it (the spawner for dungeons).
     pub fn locate(&self, kind: &str, x: i32, z: i32) -> Option<(i32, i32, i32)> {
         if let Generator::Nether(n) = self {
-            return (kind == "fortress").then(|| n.nearest_fortress(x, z, 6)).flatten();
+            return match kind {
+                "fortress" => n.nearest_fortress(x, z, 6),
+                "bastion" => n.bastions.nearest(n.seed, x, z, 6, &|x, z, r| n.build_bastion(x, z, r)),
+                _ => None,
+            };
+        }
+        if let Generator::End(e) = self {
+            return (kind == "end_city").then(|| e.cities.nearest(e.seed, x, z, 8, &|x, z, r| e.build_city(x, z, r))).flatten();
         }
         let Generator::Overworld(g) = self else { return None };
         match kind {
-            "pyramid" => g.nearest_feature(Feature::Pyramid, x, z, 8),
-            "outpost" => g.nearest_feature(Feature::Outpost, x, z, 8),
+            k if Feature::from_name(k).is_some() => g.nearest_feature(Feature::from_name(k).unwrap(), x, z, 8),
             "stronghold" => g.strongholds().iter().min_by_key(|(sx, sz)| ((*sx - x) as i64).pow(2) + ((*sz - z) as i64).pow(2)).map(|&(sx, sz)| (sx, g.stronghold_floor(sx, sz), sz)),
             "village" => g.village_centers_near(x, z, 2000).into_iter().min_by_key(|(vx, vz)| ((*vx - x) as i64).pow(2) + ((*vz - z) as i64).pow(2)).map(|(vx, vz)| (vx, g.height(vx, vz), vz)),
             "dungeon" => g.dungeon_near(x, z, 24),
@@ -109,8 +115,30 @@ impl Generator {
     pub fn in_structure(&self, kind: &str, x: i32, y: i32, z: i32) -> bool {
         match (self, kind) {
             (Generator::Nether(n), "fortress") => n.in_fortress(x, y, z),
+            (Generator::Nether(n), "bastion") => n.bastions.near(n.seed, x >> 4, z >> 4, &|x, z, r| n.build_bastion(x, z, r)).iter().any(|s| s.contains(x, y, z, 2)),
+            (Generator::End(e), "end_city") => e.cities.near(e.seed, x >> 4, z >> 4, &|x, z, r| e.build_city(x, z, r)).iter().any(|s| s.contains(x, y, z, 2)),
             (Generator::Overworld(g), "outpost") => g.in_feature(Feature::Outpost, x, z, 24),
+            (Generator::Overworld(g), k) => Feature::from_name(k).is_some_and(|f| g.in_feature_3d(f, x, y, z, 2)),
             _ => false,
+        }
+    }
+
+    /// Structures around (x, z) (to place the mobs and item frames that live in them).
+    pub fn sites_near(&self, x: i32, z: i32) -> Vec<Arc<super::structures::Structure>> {
+        let (cx, cz) = (x >> 4, z >> 4);
+        match self {
+            Generator::Overworld(g) => g.features_near(cx, cz),
+            Generator::Nether(n) => n.bastions.near(n.seed, cx, cz, &|x, z, r| n.build_bastion(x, z, r)),
+            Generator::End(e) => e.cities.near(e.seed, cx, cz, &|x, z, r| e.build_city(x, z, r)),
+            Generator::Flat(_) => vec![],
+        }
+    }
+
+    /// Top of the End island at (x, z), if there is one (for gateway exits).
+    pub fn end_island_top(&self, x: i32, z: i32) -> Option<i32> {
+        match self {
+            Generator::End(e) => e.island_top(x, z),
+            _ => None,
         }
     }
 
@@ -133,6 +161,73 @@ impl Generator {
             Generator::End(_) => "the_end",
             Generator::Flat(_) => "plains",
         }
+    }
+}
+
+// ---------- region sites ----------
+
+/// Structures placed one per region (at most): a cache of what each region holds, built on
+/// demand from the seed.
+pub struct Sites {
+    region: i32,
+    salt: u64,
+    /// How far from its spot a structure of this kind can reach (to know which chunks it touches).
+    reach: i32,
+    cache: Mutex<HashMap<(i32, i32), Option<Arc<super::structures::Structure>>>>,
+}
+
+type Build<'a> = &'a dyn Fn(i32, i32, u64) -> Option<super::structures::Structure>;
+
+impl Sites {
+    pub fn new(region: i32, salt: u64, reach: i32) -> Self {
+        Self { region, salt, reach, cache: Mutex::new(HashMap::new()) }
+    }
+
+    fn get(&self, seed: u64, rx: i32, rz: i32, build: Build) -> Option<Arc<super::structures::Structure>> {
+        if let Some(s) = self.cache.lock().unwrap().get(&(rx, rz)) {
+            return s.clone();
+        }
+        let (x, z, r) = super::structures::region_spot(seed, self.salt, self.region, rx, rz);
+        let built = build(x, z, r).map(Arc::new);
+        self.cache.lock().unwrap().insert((rx, rz), built.clone());
+        built
+    }
+
+    /// Those that may touch chunk (cx, cz).
+    pub fn near(&self, seed: u64, cx: i32, cz: i32, build: Build) -> Vec<Arc<super::structures::Structure>> {
+        let (rx, rz) = (cx.div_euclid(self.region), cz.div_euclid(self.region));
+        let span = 1 + self.reach / (self.region * 16);
+        let mut out = Vec::new();
+        for dx in -span..=span {
+            for dz in -span..=span {
+                let (x, z, _) = super::structures::region_spot(seed, self.salt, self.region, rx + dx, rz + dz);
+                if (x - (cx * 16 + 8)).abs() > self.reach + 8 || (z - (cz * 16 + 8)).abs() > self.reach + 8 {
+                    continue;
+                }
+                if let Some(s) = self.get(seed, rx + dx, rz + dz, build) {
+                    out.push(s);
+                }
+            }
+        }
+        out
+    }
+
+    /// The nearest one within `regions` regions: a point in it.
+    pub fn nearest(&self, seed: u64, x: i32, z: i32, regions: i32, build: Build) -> Option<(i32, i32, i32)> {
+        let (rx, rz) = ((x >> 4).div_euclid(self.region), (z >> 4).div_euclid(self.region));
+        let mut best: Option<(i64, (i32, i32, i32))> = None;
+        for dx in -regions..=regions {
+            for dz in -regions..=regions {
+                let Some(s) = self.get(seed, rx + dx, rz + dz, build) else { continue };
+                let (fx, fz, _) = super::structures::region_spot(seed, self.salt, self.region, rx + dx, rz + dz);
+                let y = s.bounds.map_or(64, |(lo, hi)| (lo.y + hi.y) / 2);
+                let d = ((fx - x) as i64).pow(2) + ((fz - z) as i64).pow(2);
+                if best.is_none_or(|b| d < b.0) {
+                    best = Some((d, (fx, y, fz)));
+                }
+            }
+        }
+        best.map(|b| b.1)
     }
 }
 
@@ -327,7 +422,7 @@ impl Biome {
         }
     }
 
-    fn water(self) -> bool {
+    pub fn water(self) -> bool {
         matches!(self, Biome::Ocean | Biome::DeepOcean | Biome::FrozenOcean | Biome::WarmOcean | Biome::River | Biome::FrozenRiver)
     }
 
@@ -404,15 +499,69 @@ pub struct Overworld {
 pub enum Feature {
     Pyramid,
     Outpost,
+    Mineshaft,
+    JungleTemple,
+    Shipwreck,
+    OceanRuin,
+    RuinedPortal,
+    Monument,
+    AncientCity,
 }
 
 impl Feature {
+    pub const ALL: [Feature; 9] = [
+        Feature::Pyramid,
+        Feature::Outpost,
+        Feature::Mineshaft,
+        Feature::JungleTemple,
+        Feature::Shipwreck,
+        Feature::OceanRuin,
+        Feature::RuinedPortal,
+        Feature::Monument,
+        Feature::AncientCity,
+    ];
+
     /// (region size in chunks, salt)
     fn placement(self) -> (i32, u64) {
         match self {
             Feature::Pyramid => (24, 0xDE5E),
             Feature::Outpost => (30, 0x0075),
+            Feature::Mineshaft => (12, 0x3157),
+            Feature::JungleTemple => (24, 0x7e3b),
+            Feature::Shipwreck => (16, 0x5419),
+            Feature::OceanRuin => (14, 0x0c3a),
+            Feature::RuinedPortal => (25, 0x9071),
+            Feature::Monument => (32, 0x3013),
+            Feature::AncientCity => (24, 0xa1c1),
         }
+    }
+
+    /// How far it reaches from its spot.
+    fn reach(self) -> i32 {
+        match self {
+            Feature::Mineshaft => 110,
+            Feature::AncientCity => 48,
+            Feature::Monument => 40,
+            _ => 32,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Feature::Pyramid => "pyramid",
+            Feature::Outpost => "outpost",
+            Feature::Mineshaft => "mineshaft",
+            Feature::JungleTemple => "jungle_temple",
+            Feature::Shipwreck => "shipwreck",
+            Feature::OceanRuin => "ocean_ruin",
+            Feature::RuinedPortal => "ruined_portal",
+            Feature::Monument => "monument",
+            Feature::AncientCity => "ancient_city",
+        }
+    }
+
+    pub fn from_name(n: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|f| f.name() == n)
     }
 }
 
@@ -496,7 +645,22 @@ impl Overworld {
         let heights: Vec<i32> = [(-10, -10), (10, -10), (-10, 10), (10, 10), (0, 0)].iter().map(|(dx, dz)| self.height(x + dx, z + dz)).collect();
         let flat = heights.iter().max().unwrap() - heights.iter().min().unwrap();
         use Biome::*;
+        let low = *heights.iter().min().unwrap();
+        let ocean = matches!(biome, Ocean | DeepOcean | WarmOcean | FrozenOcean);
+        let seed = self.seed ^ r;
+        use super::buildings as b;
         let built = match kind {
+            Feature::Mineshaft if r % 2 == 0 => {
+                let y = 10 + ((r >> 8) % 30) as i32;
+                (low - 12 > y).then(|| b::mineshaft(x, y, z, seed))
+            }
+            Feature::JungleTemple if biome == Jungle && flat <= 6 && g > SEA_LEVEL => Some(b::jungle_temple(x, z, low, seed)),
+            Feature::Shipwreck if ocean && g < SEA_LEVEL - 4 => Some(b::shipwreck(x, z, g, true, seed)),
+            Feature::Shipwreck if matches!(biome, Beach | SnowyBeach) && (r >> 30) % 2 == 0 => Some(b::shipwreck(x, z, g, false, seed)),
+            Feature::OceanRuin if ocean && g < SEA_LEVEL - 3 => Some(b::ocean_ruin(x, z, g, biome == WarmOcean, seed)),
+            Feature::RuinedPortal if !ocean && !biome.water() && g > SEA_LEVEL && (r >> 32) % 2 == 0 => Some(b::ruined_portal(x, z, low, seed)),
+            Feature::Monument if matches!(biome, Ocean | DeepOcean) && g < SEA_LEVEL - 12 => Some(b::monument(x, z, g, SEA_LEVEL, seed)),
+            Feature::AncientCity if (r >> 24) % 2 == 0 => Some(b::ancient_city(x, z, -51, seed)),
             Feature::Pyramid if biome == Desert && flat <= 5 && g > SEA_LEVEL => Some(super::structures::desert_pyramid(x, z, *heights.iter().min().unwrap())),
             Feature::Outpost
                 if matches!(biome, Plains | SunflowerPlains | Savanna | Desert | Taiga | SnowyPlains) && flat <= 6 && g > SEA_LEVEL && (r >> 40) % 3 != 0 && self.village_centers_near(x, z, 200).is_empty() =>
@@ -510,16 +674,18 @@ impl Overworld {
         built
     }
 
-    /// Surface structures whose area touches chunk (cx, cz).
-    fn features_near(&self, cx: i32, cz: i32) -> Vec<Arc<super::structures::Structure>> {
+    /// Structures whose area touches chunk (cx, cz).
+    pub fn features_near(&self, cx: i32, cz: i32) -> Vec<Arc<super::structures::Structure>> {
         let mut out = Vec::new();
-        for kind in [Feature::Pyramid, Feature::Outpost] {
+        for kind in Feature::ALL {
             let (region, salt) = kind.placement();
+            let reach = kind.reach() + 8;
+            let span = 1 + kind.reach() / (region * 16);
             let (rx, rz) = (cx.div_euclid(region), cz.div_euclid(region));
-            for dx in -1..=1 {
-                for dz in -1..=1 {
+            for dx in -span..=span {
+                for dz in -span..=span {
                     let (x, z, _) = super::structures::region_spot(self.seed, salt, region, rx + dx, rz + dz);
-                    if (x - (cx * 16 + 8)).abs() > 40 || (z - (cz * 16 + 8)).abs() > 40 {
+                    if (x - (cx * 16 + 8)).abs() > reach || (z - (cz * 16 + 8)).abs() > reach {
                         continue;
                     }
                     if let Some(f) = self.feature(kind, rx + dx, rz + dz) {
@@ -543,8 +709,12 @@ impl Overworld {
                 }
                 let (fx, fz, _) = super::structures::region_spot(self.seed, salt, region, rx + dx, rz + dz);
                 let d = ((fx - x) as i64).pow(2) + ((fz - z) as i64).pow(2);
+                let fy = match kind {
+                    Feature::Mineshaft | Feature::AncientCity => self.feature(kind, rx + dx, rz + dz).and_then(|s| s.bounds).map_or(0, |(lo, hi)| (lo.y + hi.y) / 2),
+                    _ => self.height(fx, fz),
+                };
                 if best.is_none_or(|b| d < b.0) {
-                    best = Some((d, (fx, self.height(fx, fz), fz)));
+                    best = Some((d, (fx, fy, fz)));
                 }
             }
         }
@@ -560,12 +730,12 @@ impl Overworld {
     }
 
     fn feature_kind_matches(&self, f: &super::structures::Structure, kind: Feature) -> bool {
-        // Pyramids have chests from the desert table, outposts from the outpost one.
-        let loot = match kind {
-            Feature::Pyramid => super::structures::Loot::DesertPyramid,
-            Feature::Outpost => super::structures::Loot::Outpost,
-        };
-        f.chests.iter().any(|c| c.1 == loot)
+        f.kind == kind.name()
+    }
+
+    /// Whether (x, y, z) is inside a structure of that kind.
+    pub fn in_feature_3d(&self, kind: Feature, x: i32, y: i32, z: i32, margin: i32) -> bool {
+        self.features_near(x >> 4, z >> 4).iter().any(|f| f.kind == kind.name() && f.contains(x, y, z, margin))
     }
 
     pub fn strongholds(&self) -> &[(i32, i32)] {
@@ -816,7 +986,8 @@ impl Overworld {
                 }
             }
         }
-        // 6. Surface structures: desert pyramids, pillager outposts.
+        // 6. Structures: desert pyramids, pillager outposts, temples, wrecks, ruins, portals,
+        //    monuments, mineshafts and ancient cities.
         for f in self.features_near(cx, cz) {
             f.apply(&mut c, cx, cz, self.seed);
         }
@@ -1388,6 +1559,8 @@ pub struct NetherGen {
     seed: u64,
     noise: Noise,
     fortresses: Mutex<HashMap<(i32, i32), Option<Arc<super::structures::Structure>>>>,
+    /// Bastion remnants.
+    pub bastions: Sites,
 }
 
 /// Nether fortresses: one in two of every three regions of 20x20 chunks, deck at y 66.
@@ -1396,7 +1569,15 @@ const FORTRESS_Y: i32 = 66;
 
 impl NetherGen {
     fn new(seed: u64) -> Self {
-        Self { seed: seed ^ 0x6e65_7468, noise: Noise { seed: seed ^ 0x6e65_7468 }, fortresses: Mutex::new(HashMap::new()) }
+        Self { seed: seed ^ 0x6e65_7468, noise: Noise { seed: seed ^ 0x6e65_7468 }, fortresses: Mutex::new(HashMap::new()), bastions: Sites::new(22, 0xba57, 24) }
+    }
+
+    /// A bastion in one of every two regions, away from fortresses.
+    fn build_bastion(&self, x: i32, z: i32, r: u64) -> Option<super::structures::Structure> {
+        if r % 2 != 0 || self.in_fortress(x, FORTRESS_Y, z) || !self.fortresses_near(x >> 4, z >> 4).iter().all(|f| !f.contains(x, FORTRESS_Y, z, 40)) {
+            return None;
+        }
+        Some(super::buildings::bastion(x, z, 48, self.seed ^ r))
     }
 
     fn fortress(&self, rx: i32, rz: i32) -> Option<Arc<super::structures::Structure>> {
@@ -1519,6 +1700,9 @@ impl NetherGen {
         for f in self.fortresses_near(cx, cz) {
             f.apply(&mut c, cx, cz, self.seed);
         }
+        for b in self.bastions.near(self.seed, cx, cz, &|x, z, r| self.build_bastion(x, z, r)) {
+            b.apply(&mut c, cx, cz, self.seed);
+        }
         c
     }
 }
@@ -1528,6 +1712,8 @@ impl NetherGen {
 pub struct EndGen {
     seed: u64,
     noise: Noise,
+    /// End cities on the outer islands.
+    pub cities: Sites,
 }
 
 /// Obsidian pillars around the central island: (x, z, radius, height).
@@ -1543,7 +1729,31 @@ pub fn end_pillars() -> Vec<(i32, i32, i32, i32)> {
 
 impl EndGen {
     fn new(seed: u64) -> Self {
-        Self { seed: seed ^ 0x656e_6400, noise: Noise { seed: seed ^ 0x656e_6400 } }
+        Self { seed: seed ^ 0x656e_6400, noise: Noise { seed: seed ^ 0x656e_6400 }, cities: Sites::new(20, 0xe9d0, 40) }
+    }
+
+    /// Top of the island at (x, z), if any (the same shapes `generate` builds).
+    pub fn island_top(&self, x: i32, z: i32) -> Option<i32> {
+        let d = ((x as f64).powi(2) + (z as f64).powi(2)).sqrt();
+        let wobble = self.noise.fbm2(1, x as f64 / 30.0, z as f64 / 30.0) * 30.0;
+        if d < 90.0 + wobble {
+            let k = 1.0 - d / (90.0 + wobble);
+            return Some((58.0 + k * 6.0) as i32);
+        }
+        if d > 1000.0 {
+            let v = self.noise.fbm2(2, x as f64 / 90.0, z as f64 / 90.0);
+            if v > 0.6 {
+                return Some((55.0 + (v - 0.6) / 0.4 * 10.0) as i32);
+            }
+        }
+        None
+    }
+
+    /// An End city on a big enough outer island.
+    fn build_city(&self, x: i32, z: i32, r: u64) -> Option<super::structures::Structure> {
+        let far = ((x as f64).powi(2) + (z as f64).powi(2)).sqrt() > 1100.0;
+        let solid = [(0, 0), (6, 0), (-6, 0), (0, 6), (0, -6)].iter().all(|(dx, dz)| self.island_top(x + dx, z + dz).is_some());
+        (far && solid && r % 3 != 0).then(|| super::buildings::end_city(x, z, self.island_top(x, z).unwrap_or(60), self.seed ^ r))
     }
 
     fn generate(&self, cx: i32, cz: i32) -> Chunk {
@@ -1614,7 +1824,9 @@ impl EndGen {
                 }
             }
         }
-        let _ = self.seed;
+        for city in self.cities.near(self.seed, cx, cz, &|x, z, r| self.build_city(x, z, r)) {
+            city.apply(&mut c, cx, cz, self.seed);
+        }
         c
     }
 }

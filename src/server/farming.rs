@@ -56,7 +56,7 @@ fn tickable() -> &'static Vec<bool> {
                 let n = reg.block_of_state(s).name.as_str();
                 CROPS.contains(&n)
                     || SAPLINGS.contains(&n)
-                    || matches!(n, "farmland" | "pumpkin_stem" | "melon_stem" | "sweet_berry_bush" | "nether_wart" | "sugar_cane" | "cactus" | "grass_block" | "mycelium" | "ice" | "snow" | "bamboo" | "bamboo_sapling" | "turtle_egg" | "frogspawn")
+                    || matches!(n, "farmland" | "pumpkin_stem" | "melon_stem" | "sweet_berry_bush" | "nether_wart" | "sugar_cane" | "cactus" | "grass_block" | "mycelium" | "ice" | "snow" | "bamboo" | "bamboo_sapling" | "turtle_egg" | "frogspawn" | "sniffer_egg")
             })
             .collect()
     })
@@ -201,6 +201,18 @@ fn random_tick(world: &mut World, p: BlockPos, state: u16, raining: bool, change
                     let eggs = block.get(state, "eggs").and_then(|v| v.parse().ok()).unwrap_or(1);
                     set(world, p, 0, changes);
                     hatched.push((p, "turtle_egg", eggs));
+                }
+            }
+        }
+        // Sniffer eggs crack twice (faster on moss) and hatch.
+        "sniffer_egg" => {
+            if rand(if name(world, below) == "moss_block" { 2 } else { 4 }) == 0 {
+                let stage: i32 = block.get(state, "hatch").and_then(|v| v.parse().ok()).unwrap_or(0);
+                if stage < 2 {
+                    set(world, p, block.with(state, "hatch", &(stage + 1).to_string()), changes);
+                } else {
+                    set(world, p, 0, changes);
+                    hatched.push((p, "sniffer_egg", 1));
                 }
             }
         }

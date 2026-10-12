@@ -528,7 +528,11 @@ fn parrot(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], actio
 pub fn hatch(server: &Arc<Server>, dim: Dimension, hatched: Vec<(BlockPos, &'static str, i32)>) {
     for (p, what, n) in hatched {
         let at = [p.x as f64 + 0.5, p.y as f64, p.z as f64 + 0.5];
-        let kind = if what == "turtle_egg" { MobKind::Turtle } else { MobKind::Tadpole };
+        let kind = match what {
+            "turtle_egg" => MobKind::Turtle,
+            "sniffer_egg" => MobKind::Sniffer,
+            _ => MobKind::Tadpole,
+        };
         for _ in 0..n {
             let eid = mobs::spawn(server, dim, kind, [at[0] + (r() - 0.5) * 0.4, at[1], at[2] + (r() - 0.5) * 0.4]);
             if let Some(m) = server.mobs.lock().unwrap().get_mut(&eid) {
@@ -538,7 +542,11 @@ pub fn hatch(server: &Arc<Server>, dim: Dimension, hatched: Vec<(BlockPos, &'sta
                 }
             }
         }
-        let snd = if kind == MobKind::Turtle { "entity.turtle.egg_hatch" } else { "block.frogspawn.hatch" };
+        let snd = match kind {
+            MobKind::Turtle => "entity.turtle.egg_hatch",
+            MobKind::Sniffer => "block.sniffer_egg.hatch",
+            _ => "block.frogspawn.hatch",
+        };
         sound::at(server, dim, at, snd, sound::BLOCK, 1.0, 1.0);
     }
 }

@@ -3,6 +3,7 @@
 
 pub mod anvil;
 pub mod blockentity;
+pub mod buildings;
 pub mod chunk;
 pub mod generator;
 pub mod pathfind;

@@ -37,6 +37,7 @@ async fn main() -> Result<()> {
     server::raids::load(&srv);
     server::leads::restore(&srv);
     server::frames::load(&srv);
+    server::decor::load(&srv);
     server::vehicles::load(&srv);
     server::maps::load(&std::path::PathBuf::from(&config.world_folder));
 

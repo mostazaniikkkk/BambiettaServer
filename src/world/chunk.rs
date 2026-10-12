@@ -331,6 +331,12 @@ impl Chunk {
         self.sections[ry >> 4].biomes[((ry & 15) >> 2 << 4) | (z >> 2 << 2) | (x >> 2)]
     }
 
+    /// Sets the biome of the 4x4x4 cell at (x4, y, z4) (cell coordinates 0..4, block height).
+    pub fn set_biome_at(&mut self, x4: usize, y: i32, z4: usize, biome: u8) {
+        let ry = (y - self.min_y).clamp(0, self.height() - 1) as usize;
+        self.sections[ry >> 4].biomes[((ry & 15) >> 2 << 4) | (z4 << 2) | x4] = biome;
+    }
+
     /// Sets the biome of the whole column of cells at (x4, z4) (cell coordinates 0..4).
     pub fn set_biome_column(&mut self, x4: usize, z4: usize, biome: u8) {
         for s in &mut self.sections {

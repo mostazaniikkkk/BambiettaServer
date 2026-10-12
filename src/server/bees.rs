@@ -49,7 +49,7 @@ fn front(world: &mut World, hive: BlockPos) -> [f64; 3] {
 
 /// Flies towards `to` (3D). Stuck against something (a trunk, leaves) for a second, it goes
 /// up and to one side for a moment before trying again.
-fn fly(m: &mut Mob, to: [f64; 3], speed: f64) {
+pub(super) fn fly(m: &mut Mob, to: [f64; 3], speed: f64) {
     let moved = m.last_target.map_or(1.0, |p| mobs::dist2(&p, &m.pos).sqrt());
     m.last_target = Some(m.pos);
     if moved < 0.01 {

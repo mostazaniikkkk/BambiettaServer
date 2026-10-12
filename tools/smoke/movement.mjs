@@ -7,6 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 const host = process.argv[2] ?? '127.0.0.1'
 const port = Number(process.argv[3] ?? 25565)
 const bot = mineflayer.createBot({ host, port, username: 'Runner', version: '1.20.4', auth: 'offline' })
+bot._client.on('registry_data', p => bot.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await once(bot, 'spawn'); await bot.waitForChunksToLoad(); await sleep(500)
 bot.chat('/gamemode survival'); bot.chat('/heal'); await sleep(500)
 let forced = 0

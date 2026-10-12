@@ -406,10 +406,16 @@ pub fn sync_window(server: &Arc<Server>, player: &Arc<Player>) {
     }
 }
 
-/// What it drops when it dies: saddle, armor, chest and its contents.
+/// What it drops when it dies: saddle, armor, chest and its contents (an allay: its items).
 pub fn belongings(m: &Mob) -> Vec<ItemStack> {
     let reg = data::get();
     let mut out = Vec::new();
+    // An allay drops the item it was given and what it collected.
+    if m.kind == MobKind::Allay {
+        out.extend(m.armor.clone());
+        out.extend(m.chest.iter().flatten().flatten().cloned());
+        return out;
+    }
     if m.saddle {
         out.extend(reg.item_id("saddle").map(|i| ItemStack::new(i, 1)));
     }

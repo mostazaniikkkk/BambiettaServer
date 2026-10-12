@@ -7,6 +7,9 @@ import https from 'node:https'
 import { once } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+// mineflayer race with fast servers: registry data can arrive before its plugins load.
+const fixRace = b => { b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)); return b }
+
 const host = process.argv[2] ?? '127.0.0.1'
 const port = Number(process.argv[3] ?? 25565)
 let failures = 0
@@ -23,12 +26,13 @@ const bot = async (username, url) => {
   await once(ws, 'open')
   const stream = createWebSocketStream(ws)
   const connect = client => { client.setSocket(stream); setImmediate(() => client.emit('connect')) }
-  return mineflayer.createBot({ host, port, username, version: '1.20.4', auth: 'offline', connect })
+  return fixRace(mineflayer.createBot({ host, port, username, version: '1.20.4', auth: 'offline', connect }))
 }
 
 const secure = await bot('WssBot', `wss://${host}:${port}`)
 const plain = await bot('WsBot', `ws://${host}:${port}`)
 const tcp = mineflayer.createBot({ host, port, username: 'TcpBot', version: '1.20.4', auth: 'offline' })
+tcp._client.on('registry_data', p => tcp.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await Promise.all([once(secure, 'spawn'), once(plain, 'spawn'), once(tcp, 'spawn')])
 check(true, 'los tres transportes (wss, ws y tcp) entran en el mismo puerto')
 await sleep(1000)

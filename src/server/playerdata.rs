@@ -29,6 +29,12 @@ pub struct PlayerData {
     pub xp_seed: i32,
     #[serde(default)]
     pub spawn_point: Option<[i32; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_death: Option<(String, [i32; 3])>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_dimension: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ender: Vec<crate::world::blockentity::SavedSlot>,
     #[serde(default)]
     pub dimension: Option<String>,
     /// Active effects: (name, amplifier, remaining ticks).
@@ -77,6 +83,9 @@ pub fn apply(data: PlayerData, st: &mut PlayerState) -> crate::world::Dimension 
     st.held_slot = data.held_slot.min(8);
     (st.xp_level, st.xp_progress, st.xp_total) = (data.xp_level.max(0), data.xp_progress.clamp(0.0, 1.0), data.xp_total.max(0));
     st.spawn_point = data.spawn_point.map(|p| crate::protocol::BlockPos::new(p[0], p[1], p[2]));
+    st.spawn_dim = data.spawn_dimension.as_deref().and_then(|d| crate::world::Dimension::ALL.into_iter().find(|x| x.name() == d)).unwrap_or(crate::world::Dimension::Overworld);
+    st.ender = crate::world::blockentity::load_slots(&data.ender, 27);
+    st.last_death = data.last_death.as_ref().and_then(|(d, p)| Some((crate::world::Dimension::ALL.into_iter().find(|x| x.name() == d)?, crate::protocol::BlockPos::new(p[0], p[1], p[2]))));
     if data.xp_seed != 0 {
         st.xp_seed = data.xp_seed;
     }
@@ -120,6 +129,9 @@ pub fn save(server: &Server, player: &Arc<Player>) {
             xp_total: st.xp_total,
             xp_seed: st.xp_seed,
             spawn_point: st.spawn_point.map(|p| [p.x, p.y, p.z]),
+            last_death: st.last_death.map(|(d, p)| (d.name().to_string(), [p.x, p.y, p.z])),
+            spawn_dimension: (st.spawn_dim != crate::world::Dimension::Overworld).then(|| st.spawn_dim.name().to_string()),
+            ender: crate::world::blockentity::save_slots(&st.ender),
             dimension: Some(player.dim().name().to_string()),
             effects: st.effects.iter().map(|e| (super::effects::name(e.id).to_string(), e.amp, e.duration)).collect(),
             absorption: st.absorption,

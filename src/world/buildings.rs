@@ -566,3 +566,203 @@ pub fn bastion(x: i32, z: i32, y: i32, seed: u64) -> Structure {
     s.mobs.push(([x as f64 - 9.5, y as f64 + 9.0, z as f64 - 9.5], "hoglin"));
     s
 }
+
+// ---------- Nether ruined portal ----------
+
+/// A ruined portal in the Nether: the same broken frame on a platform of netherrack,
+/// blackstone and magma, with room cleared around it (it sits in a cave at height `y`).
+pub fn ruined_portal_nether(x: i32, z: i32, y: i32, seed: u64) -> Structure {
+    let mut s = Structure::of("ruined_portal");
+    // Room above, solid ground under the platform (so it does not hang over the lava sea).
+    s.fill((x - 5, y + 1, z - 4), (x + 6, y + 7, z + 4), |_, _, _| 0);
+    s.fill((x - 4, y - 3, z - 3), (x + 5, y - 1, z + 3), |_, _, _| st("netherrack"));
+    s.fill((x - 4, y, z - 3), (x + 5, y, z + 3), |_, _, _| st("netherrack"));
+    let portal = ruined_portal(x, z, y, seed);
+    s.blocks.extend(portal.blocks);
+    s.chests.extend(portal.chests);
+    s
+}
+
+// ---------- igloo ----------
+
+/// An igloo on snowy ground: a dome of snow blocks with ice windows, a bed, a furnace and a
+/// crafting table, and under a carpet a trapdoor and ladder down to a basement where a
+/// villager and a zombie villager are locked up, with a brewing stand, a chest and a
+/// cauldron.
+pub fn igloo(x: i32, z: i32, g: i32, seed: u64) -> Structure {
+    let mut s = Structure::of("igloo");
+    let mut r = rng(seed ^ 0x1910);
+    let (snow, ice) = (st("snow_block"), st("ice"));
+    // The dome: an ellipsoid shell 4 high.
+    s.fill((x - 4, g + 1, z - 4), (x + 4, g + 4, z + 4), |bx, by, bz| {
+        let (dx, dy, dz) = ((bx - x) as f64, (by - g - 1) as f64, (bz - z) as f64);
+        let d = (dx * dx) / 16.0 + (dy * dy) / 12.0 + (dz * dz) / 16.0;
+        if d <= 0.75 {
+            0
+        } else if d <= 1.25 {
+            snow
+        } else {
+            0
+        }
+    });
+    // Floor, door (south) and windows.
+    s.fill((x - 3, g, z - 3), (x + 3, g, z + 3), |_, _, _| snow);
+    s.fill((x, g + 1, z + 3), (x, g + 2, z + 4), |_, _, _| 0);
+    s.set(x - 3, g + 2, z, ice);
+    s.set(x + 3, g + 2, z, ice);
+    // Furniture.
+    s.set(x - 2, g + 1, z - 2, with("red_bed", &[("facing", "north"), ("part", "head")]));
+    s.set(x - 2, g + 1, z - 1, with("red_bed", &[("facing", "north"), ("part", "foot")]));
+    s.set(x + 2, g + 1, z - 2, with("furnace", &[("facing", "south")]));
+    s.set(x + 2, g + 1, z - 1, st("crafting_table"));
+    s.set(x + 2, g + 1, z + 1, st("redstone_torch"));
+    // The way down, hidden under a carpet... in half of them.
+    if r() % 2 == 0 {
+        s.set(x, g + 1, z, st("white_carpet"));
+        s.set(x, g, z, with("oak_trapdoor", &[("half", "top"), ("facing", "north")]));
+        let deep = g - 9;
+        for y in deep + 1..g {
+            s.set(x, y, z, with("ladder", &[("facing", "south")]));
+            s.set(x, y, z - 1, st("stone_bricks"));
+        }
+        // The basement: stone bricks, two cells with iron bars.
+        s.fill((x - 4, deep - 1, z - 1), (x + 4, deep + 3, z + 8), |bx, by, bz| {
+            if bx == x - 4 || bx == x + 4 || by == deep - 1 || by == deep + 3 || bz == z - 1 || bz == z + 8 {
+                st("stone_bricks")
+            } else {
+                0
+            }
+        });
+        s.fill((x - 3, deep, z + 5), (x + 3, deep + 2, z + 5), |bx, _, _| if bx == x { st("stone_bricks") } else { st("iron_bars") });
+        s.fill((x, deep, z + 6), (x, deep + 2, z + 7), |_, _, _| st("stone_bricks"));
+        s.set(x - 3, deep, z + 1, st("brewing_stand"));
+        s.set(x + 3, deep, z + 1, st("cauldron"));
+        s.chest(BlockPos::new(x + 3, deep, z + 3), "west", Loot::Igloo);
+        s.set(x - 1, deep + 2, z + 2, st("lantern"));
+        s.mobs.push(([x as f64 - 2.0 + 0.5, deep as f64, z as f64 + 6.5], "villager"));
+        s.mobs.push(([x as f64 + 2.0 + 0.5, deep as f64, z as f64 + 6.5], "zombie_villager"));
+    }
+    s
+}
+
+// ---------- swamp hut ----------
+
+/// A witch's hut on stilts over the swamp: spruce planks, oak log stilts, a flower pot with a
+/// red mushroom, a crafting table and a cauldron. A witch and her black cat live in it, and
+/// witches keep spawning inside it.
+pub fn swamp_hut(x: i32, z: i32, g: i32) -> Structure {
+    let mut s = Structure::of("swamp_hut");
+    let (planks, log) = (st("spruce_planks"), with("oak_log", &[("axis", "y")]));
+    let floor = g.max(62) + 2;
+    // Stilts down to the ground.
+    for (dx, dz) in [(0, 0), (4, 0), (0, 6), (4, 6)] {
+        for y in g - 2..floor {
+            s.set(x + dx, y, z + dz, log);
+        }
+    }
+    // Floor, walls, roof.
+    s.fill((x, floor, z), (x + 4, floor, z + 6), |_, _, _| planks);
+    s.fill((x, floor + 1, z + 1), (x + 4, floor + 3, z + 6), |bx, _, bz| if bx == x || bx == x + 4 || bz == z + 1 || bz == z + 6 { planks } else { 0 });
+    for (dx, dz) in [(0, 1), (4, 1), (0, 6), (4, 6)] {
+        s.fill((x + dx, floor + 1, z + dz), (x + dx, floor + 3, z + dz), |_, _, _| log);
+    }
+    s.fill((x - 1, floor + 4, z - 1), (x + 5, floor + 4, z + 7), |_, _, _| st("spruce_slab"));
+    // Door, windows and porch.
+    s.fill((x + 2, floor + 1, z + 1), (x + 2, floor + 2, z + 1), |_, _, _| 0);
+    s.set(x, floor + 2, z + 3, st("oak_fence"));
+    s.set(x + 4, floor + 2, z + 3, st("oak_fence"));
+    s.set(x, floor + 1, z - 0, st("oak_fence"));
+    s.set(x + 4, floor + 1, z - 0, st("oak_fence"));
+    // Inside.
+    s.set(x + 1, floor + 1, z + 5, st("crafting_table"));
+    s.set(x + 3, floor + 1, z + 5, st("cauldron"));
+    s.set(x + 1, floor + 2, z + 2, st("potted_red_mushroom"));
+    s.mobs.push(([x as f64 + 2.5, floor as f64 + 1.0, z as f64 + 3.5], "witch"));
+    s.mobs.push(([x as f64 + 2.5, floor as f64 + 1.0, z as f64 + 4.5], "cat:all_black"));
+    s
+}
+
+// ---------- woodland mansion ----------
+
+/// A woodland mansion in the dark forest: a big two-storey house of dark oak with cobblestone
+/// foundations, birch floors and glass windows, halls, a dining room, bedrooms with chests,
+/// and jail cells upstairs with allays locked in them. Vindicators and evokers guard it.
+pub fn mansion(x: i32, z: i32, g: i32, seed: u64) -> Structure {
+    let mut s = Structure::of("mansion");
+    let mut r = rng(seed ^ 0x3a45);
+    let (cobble, planks, log, birch, glass, carpet) =
+        (st("cobblestone"), st("dark_oak_planks"), with("dark_oak_log", &[("axis", "y")]), st("birch_planks"), st("glass_pane"), st("red_carpet"));
+    let (w, d) = (18, 14);
+    let floors = [g + 1, g + 8];
+    // Foundations down to the ground.
+    s.fill((x - w, g - 4, z - d), (x + w, g, z + d), |_, _, _| cobble);
+    for (i, &f) in floors.iter().enumerate() {
+        let top = f + 6;
+        s.fill((x - w, f, z - d), (x + w, top, z + d), |bx, by, bz| {
+            let edge = bx == x - w || bx == x + w || bz == z - d || bz == z + d;
+            let corner = (bx == x - w || bx == x + w) && (bz == z - d || bz == z + d);
+            let post = edge && ((bx - x) % 6 == 0 || (bz - z) % 7 == 0);
+            if by == f {
+                if edge { cobble } else { birch }
+            } else if by == top {
+                planks
+            } else if corner || post {
+                log
+            } else if edge {
+                if by == f + 2 || by == f + 3 { glass } else { planks }
+            } else if (bx - x) % 9 == 0 || bz == z {
+                // Inner walls: rooms on both sides of a long hall.
+                if (bz - z).abs() <= 1 || (bx - x).abs() % 9 == 0 && (bz - z).abs() == 4 && by <= f + 2 {
+                    0
+                } else {
+                    planks
+                }
+            } else {
+                0
+            }
+        });
+        // The long hall through the middle, carpeted.
+        s.fill((x - w + 1, f + 1, z - 1), (x + w - 1, f + 3, z + 1), |_, by, _| if by == f + 1 { carpet } else { 0 });
+        // Chests in the rooms.
+        for k in 0..3 {
+            let cx = x - w + 4 + k * 12;
+            s.chest(BlockPos::new(cx, f + 1, z - d + 1), "south", Loot::Mansion);
+            if r() % 2 == 0 {
+                s.chest(BlockPos::new(cx, f + 1, z + d - 1), "north", Loot::Mansion);
+            }
+        }
+        // Lights.
+        for k in -2..=2 {
+            s.set(x + k * 7, f + 5, z, st("lantern"));
+        }
+        if i == 0 {
+            // Front door (south) and a dining table.
+            s.fill((x - 1, f + 1, z + d), (x + 1, f + 3, z + d), |_, _, _| 0);
+            s.fill((x - 3, f + 1, z - 6), (x + 3, f + 1, z - 6), |_, _, _| st("dark_oak_fence"));
+            s.fill((x - 3, f + 2, z - 6), (x + 3, f + 2, z - 6), |_, _, _| st("white_carpet"));
+        } else {
+            // Jail cells along the back with allays inside.
+            for k in 0..3 {
+                let cx = x - 12 + k * 12;
+                s.fill((cx - 1, f + 1, z + d - 4), (cx + 1, f + 3, z + d - 1), |bx, _, bz| if bz == z + d - 4 || bx == cx - 1 || bx == cx + 1 { st("iron_bars") } else { 0 });
+                s.mobs.push(([cx as f64 + 0.5, f as f64 + 1.5, (z + d - 2) as f64 + 0.5], "allay"));
+            }
+        }
+    }
+    // Stairs between the floors (west end).
+    for k in 0..7 {
+        s.set(x - w + 2 + k, g + 2 + k, z - 3, with("dark_oak_stairs", &[("facing", "east")]));
+        s.fill((x - w + 2 + k, g + 3 + k, z - 3), (x - w + 2 + k, g + 5 + k, z - 3), |_, _, _| 0);
+        s.set(x - w + 2 + k, floors[1], z - 3, 0);
+    }
+    // A cobblestone roof edge.
+    s.fill((x - w - 1, g + 15, z - d - 1), (x + w + 1, g + 15, z + d + 1), |_, _, _| st("dark_oak_slab"));
+    // Its guards.
+    for k in 0..4 {
+        let px = x - w + 4 + k * 10;
+        s.mobs.push(([px as f64 + 0.5, floors[k as usize % 2] as f64 + 1.0, z as f64 + 0.5], "vindicator"));
+    }
+    s.mobs.push(([x as f64 + 0.5, floors[1] as f64 + 1.0, z as f64 + 0.5], "evoker"));
+    s.mobs.push(([x as f64 - 8.5, floors[0] as f64 + 1.0, z as f64 + 0.5], "evoker"));
+    s
+}

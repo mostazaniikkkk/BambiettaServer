@@ -11,6 +11,7 @@ const [mode = 'check', host = '127.0.0.1', port = '25565'] = process.argv.slice(
 let failures = 0
 const check = (ok, msg) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${msg}`); if (!ok) failures++ }
 const a = mineflayer.createBot({ host, port: Number(port), username: 'Checker', version: '1.20.4', auth: 'offline' })
+a._client.on('registry_data', p => a.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 a.on('messagestr', m => { if (/Unknown|denied|permission|inválid|desconocid/i.test(m)) console.log('  chat:', m) })
 await once(a, 'spawn'); await sleep(1500)
 const O = new Vec3(2100, 101, 2100)

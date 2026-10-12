@@ -4,12 +4,15 @@
 import mineflayer from 'mineflayer'
 import { once } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
+
+// mineflayer race with fast servers: registry data can arrive before its plugins load.
+const fixRace = b => { b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)); return b }
 const host = process.argv[2] ?? '127.0.0.1'
 const port = Number(process.argv[3] ?? 25565)
 let failed = 0
 const check = (ok, what) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${what}`); if (!ok) failed++ }
 const until = async (f, ms) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (f()) return true; return false }
-const bot = (username) => mineflayer.createBot({ host, port, username, version: '1.20.4', auth: 'offline' })
+const bot = (username) => fixRace(mineflayer.createBot({ host, port, username, version: '1.20.4', auth: 'offline' }))
 // Tries to join: 'spawn' or the kick reason.
 const tryJoin = (name) => new Promise(resolve => {
   const c = bot(name)

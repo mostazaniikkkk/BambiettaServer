@@ -13,6 +13,7 @@ let failed = 0
 const check = (ok, what) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${what}`); if (!ok) failed++ }
 const until = async (f, ms) => { for (const end = Date.now() + ms; Date.now() < end; await sleep(100)) if (f()) return true; return false }
 const b = mineflayer.createBot({ host, port, username: 'Explorer2', version: '1.20.4', auth: 'offline' })
+b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await once(b, 'spawn'); await sleep(1500)
 let last = ''
 b.on('messagestr', m => { last = m })

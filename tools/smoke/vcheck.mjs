@@ -5,6 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Vec3 } from 'vec3'
 const [host = '127.0.0.1', port = '25590'] = process.argv.slice(2)
 const a = mineflayer.createBot({ host, port: Number(port), username: 'Checker', version: '1.20.4', auth: 'offline' })
+a._client.on('registry_data', p => a.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 a.on('messagestr', m => { if (/Unknown|denied|permission/i.test(m)) console.log('  chat:', m) })
 await once(a, 'spawn'); await sleep(2000)
 // On vanilla the bot is not op: looking from spawn is not enough, it has to move closer.

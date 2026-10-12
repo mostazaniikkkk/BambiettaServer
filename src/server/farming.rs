@@ -57,6 +57,7 @@ fn tickable() -> &'static Vec<bool> {
                 CROPS.contains(&n)
                     || SAPLINGS.contains(&n)
                     || matches!(n, "farmland" | "pumpkin_stem" | "melon_stem" | "sweet_berry_bush" | "nether_wart" | "sugar_cane" | "cactus" | "grass_block" | "mycelium" | "ice" | "snow" | "bamboo" | "bamboo_sapling" | "turtle_egg" | "frogspawn" | "sniffer_egg")
+                    || super::household::weathers(n)
             })
             .collect()
     })
@@ -191,6 +192,7 @@ fn random_tick(world: &mut World, p: BlockPos, state: u16, raining: bool, change
     let above = BlockPos::new(p.x, p.y + 1, p.z);
     let n = block.name.as_str();
     match n {
+        _ if super::household::weathers(n) => super::household::weather(world, p, state, rand(18), changes),
         // Turtle eggs crack twice and hatch (on sand); frogspawn hatches into tadpoles.
         "turtle_egg" => {
             if name(world, below) == "sand" && rand(2) == 0 {

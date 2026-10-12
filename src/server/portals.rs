@@ -423,7 +423,9 @@ pub async fn change_dimension(server: &Arc<Server>, player: &Arc<Player>, dim: D
     let cfg = &server.config;
     let mut p = packet(id::play::RESPAWN);
     p.string(dim.name()).string(dim.name()).i64(cfg.generation.options.seed);
-    p.i8(game_mode as i8).u8(255).bool(false).bool(dim == Dimension::Overworld && cfg.generation.name == "flat").bool(false).varint(0);
+    p.i8(game_mode as i8).u8(255).bool(false).bool(dim == Dimension::Overworld && cfg.generation.name == "flat");
+    super::gadgets::death_location(&mut p, player.state.lock().unwrap().last_death);
+    p.varint(0);
     // Keep attributes and metadata (0x01 | 0x02).
     p.u8(0x03);
     player.send(p);
@@ -441,6 +443,7 @@ pub async fn change_dimension(server: &Arc<Server>, player: &Arc<Player>, dim: D
     super::border::send_state(server, player);
     super::leads::send_knots(server, player);
     super::frames::send_all(player);
+    super::decor::send_all(player);
     super::advancements::entered(server, player, dim);
     player.send(super::update_time(server.age.load(Ordering::Relaxed), server.day_time.load(Ordering::Relaxed)));
     let mut ev = packet(id::play::GAME_STATE_CHANGE);

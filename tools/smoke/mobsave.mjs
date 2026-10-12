@@ -4,6 +4,7 @@ import { once } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
 const [mode, host = '127.0.0.1', port = '25565'] = process.argv.slice(2)
 const a = mineflayer.createBot({ host, port: Number(port), username: 'Keeper', version: '1.20.4', auth: 'offline' })
+a._client.on('registry_data', p => a.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await once(a, 'spawn'); await a.waitForChunksToLoad().catch(() => {})
 a.chat('/gamemode creative'); a.chat('/tp 2000.5 101 2000.5'); await sleep(2000)
 if (mode === 'set') {

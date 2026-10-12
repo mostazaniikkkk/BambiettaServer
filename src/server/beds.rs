@@ -115,8 +115,9 @@ pub fn use_bed(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos, block:
     // Using the bed always sets the respawn point.
     {
         let mut st = player.state.lock().unwrap();
-        if st.spawn_point != Some(head) {
+        if st.spawn_point != Some(head) || st.spawn_dim != Dimension::Overworld {
             st.spawn_point = Some(head);
+            st.spawn_dim = Dimension::Overworld;
             player.message("§7Punto de reaparición establecido");
         }
     }
@@ -200,7 +201,14 @@ pub fn tick(server: &Arc<Server>) {
 
 /// Where to respawn: next to the bed if it still exists; otherwise `None` (and it is forgotten).
 pub fn respawn_point(server: &Server, player: &Player) -> Option<[f64; 3]> {
-    let head = player.state.lock().unwrap().spawn_point?;
+    let head = {
+        let st = player.state.lock().unwrap();
+        // A respawn anchor is not a bed (see `household::anchor_point`).
+        if st.spawn_dim != Dimension::Overworld {
+            return None;
+        }
+        st.spawn_point?
+    };
     let reg = data::get();
     let g = gameplay::get();
     let mut world = server.world(Dimension::Overworld).lock().unwrap();

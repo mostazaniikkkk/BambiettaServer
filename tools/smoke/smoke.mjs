@@ -6,6 +6,9 @@ import WebSocket, { createWebSocketStream } from 'ws'
 import { once } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+// mineflayer race with fast servers: registry data can arrive before its plugins load.
+const fixRace = b => { b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)); return b }
+
 const host = process.argv[2] ?? '127.0.0.1'
 const port = Number(process.argv[3] ?? 25565)
 const version = '1.20.4'
@@ -32,7 +35,7 @@ check(status.version.protocol === 765, `status TCP: ${status.version.name} / ${s
 }
 
 function tcpBot (username) {
-  return mineflayer.createBot({ host, port, username, version, auth: 'offline' })
+  return fixRace(mineflayer.createBot({ host, port, username, version, auth: 'offline' }))
 }
 
 async function wsBot (username) {
@@ -42,7 +45,7 @@ async function wsBot (username) {
   // In offline mode minecraft-protocol calls connect() before registering its listeners,
   // so 'connect' is emitted on the next tick.
   const connect = client => { client.setSocket(stream); setImmediate(() => client.emit('connect')) }
-  return mineflayer.createBot({ host, port, username, version, auth: 'offline', connect })
+  return fixRace(mineflayer.createBot({ host, port, username, version, auth: 'offline', connect }))
 }
 
 const a = tcpBot('TcpBot')

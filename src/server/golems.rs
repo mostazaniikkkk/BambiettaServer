@@ -38,7 +38,7 @@ pub fn guard(world: &mut World, m: &mut Mob, others: &[Other], actions: &mut Vec
 }
 
 /// Walks up to a mob and hits it when in reach (golems toss it upwards).
-fn strike_mob(world: &mut World, m: &mut Mob, prey: &Other, damage: f32, actions: &mut Vec<Action>) -> Option<([f64; 3], f64)> {
+pub(super) fn strike_mob(world: &mut World, m: &mut Mob, prey: &Other, damage: f32, actions: &mut Vec<Action>) -> Option<([f64; 3], f64)> {
     mobs::face(m, prey.pos);
     let d = mobs::dist2(&prey.pos, &m.pos).sqrt();
     let reach = 1.4 + m.size().0 / 2.0;

@@ -169,6 +169,46 @@ fn take_one(items: &mut [Slot], i: usize) -> Option<ItemStack> {
     Some(it)
 }
 
+/// One unit of `item` into a 5-slot hopper minecart's contents.
+pub fn add_to(items: &mut [Slot], item: &ItemStack) -> bool {
+    let all: Vec<usize> = (0..items.len()).collect();
+    add_one("hopper", items, &all, item)
+}
+
+/// A hopper at `pos` (enabled) takes one item out of a cart above it.
+pub fn cart_into_hopper(world: &mut World, pos: BlockPos, cart: &mut [Slot]) -> bool {
+    let state = world.get_block(pos);
+    let b = data::get().block_of_state(state);
+    if b.name != "hopper" || b.get(state, "enabled") == Some("false") {
+        return false;
+    }
+    let Some(mut mine) = items_of(world, pos) else { return false };
+    for i in 0..cart.len() {
+        let Some(it) = cart[i].clone() else { continue };
+        if add_one("hopper", &mut mine, &[0, 1, 2, 3, 4], &it) {
+            take_one(cart, i);
+            set_items(world, pos, mine);
+            return true;
+        }
+    }
+    false
+}
+
+/// A hopper minecart takes one item out of the container at `pos` (above it).
+pub fn container_into_cart(world: &mut World, pos: BlockPos, cart: &mut [Slot]) -> bool {
+    let name = name_at(world, pos);
+    let Some(mut theirs) = items_of(world, pos) else { return false };
+    for i in extract_slots(name, "down", &theirs) {
+        let Some(it) = theirs.get(i).cloned().flatten() else { continue };
+        if add_to(cart, &it) {
+            take_one(&mut theirs, i);
+            set_items(world, pos, theirs);
+            return true;
+        }
+    }
+    false
+}
+
 /// What a transfer leaves to do once the world is released.
 #[derive(Default)]
 struct Effects {

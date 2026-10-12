@@ -12,6 +12,7 @@ let failures = 0
 const check = (ok, msg) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${msg}`); if (!ok) failures++ }
 const until = async (fn, ms = 4000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await sleep(200) } return false }
 const a = mineflayer.createBot({ host, port, username: 'Defender', version: '1.20.4', auth: 'offline' })
+a._client.on('registry_data', p => a.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 let bar = null
 a._client.on('boss_bar', p => { if (p.action === 0 && JSON.stringify(p.title).includes('raid')) bar = p })
 await once(a, 'spawn'); await sleep(1500)

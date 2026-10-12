@@ -180,45 +180,51 @@ pub fn shriekers(server: &Arc<Server>, seen: &[Seen], age: i64) {
             found
         };
         let Some((p, _)) = found else { continue };
-        let level = {
-            let mut w = WARNINGS.lock().unwrap();
-            let map = w.get_or_insert_with(HashMap::new);
-            let e = map.entry(s.player.uuid).or_insert((0, 0));
-            // One shriek every 10 s at most; the warnings fade after 10 minutes.
-            if age - e.1 < 200 {
-                continue;
+        shriek(server, &s.player, s.pos, p, age);
+    }
+}
+
+/// A summoning shrieker at `p` shrieks because of `player` (who was at `pos`): Darkness, and
+/// the fourth warning in a while brings the warden up.
+pub fn shriek(server: &Arc<Server>, player: &Arc<super::Player>, pos: [f64; 3], p: BlockPos, age: i64) {
+    let level = {
+        let mut w = WARNINGS.lock().unwrap();
+        let map = w.get_or_insert_with(HashMap::new);
+        let e = map.entry(player.uuid).or_insert((0, 0));
+        // One shriek every 10 s at most; the warnings fade after 10 minutes.
+        if age - e.1 < 200 {
+            return;
+        }
+        if age - e.1 > 12000 {
+            e.0 = 0;
+        }
+        e.0 += 1;
+        e.1 = age;
+        e.0
+    };
+    sound::at(server, Dimension::Overworld, [p.x as f64 + 0.5, p.y as f64 + 0.5, p.z as f64 + 0.5], "block.sculk_shrieker.shriek", sound::BLOCK, 2.0, 1.0);
+    super::effects::add(server, player, "darkness", 0, 260, 1.0);
+    if level >= 4 {
+        WARNINGS.lock().unwrap().as_mut().unwrap().remove(&player.uuid);
+        let busy = server.mobs.lock().unwrap().values().any(|m| m.kind == MobKind::Warden && mobs::dist2(&m.pos, &pos) < 48.0 * 48.0);
+        if !busy {
+            let spot = {
+                let mut world = server.world(Dimension::Overworld).lock().unwrap();
+                (0..10).find_map(|_| {
+                    let x = p.x + (r() * 10.0) as i32 - 5;
+                    let z = p.z + (r() * 10.0) as i32 - 5;
+                    mobs::spawn_spot_at(&mut world, x, z, p.y + 4, 3)
+                })
+            };
+            if let Some(at) = spot {
+                let eid = mobs::spawn(server, Dimension::Overworld, MobKind::Warden, at);
+                sound::entity(server, eid, "entity.warden.emerge", sound::HOSTILE, 1.0, 1.0);
             }
-            if age - e.1 > 12000 {
-                e.0 = 0;
-            }
-            e.0 += 1;
-            e.1 = age;
-            e.0
-        };
-        sound::at(server, Dimension::Overworld, [p.x as f64 + 0.5, p.y as f64 + 0.5, p.z as f64 + 0.5], "block.sculk_shrieker.shriek", sound::BLOCK, 2.0, 1.0);
-        super::effects::add(server, &s.player, "darkness", 0, 260, 1.0);
-        if level >= 4 {
-            WARNINGS.lock().unwrap().as_mut().unwrap().remove(&s.player.uuid);
-            let busy = server.mobs.lock().unwrap().values().any(|m| m.kind == MobKind::Warden && mobs::dist2(&m.pos, &s.pos) < 48.0 * 48.0);
-            if !busy {
-                let spot = {
-                    let mut world = server.world(Dimension::Overworld).lock().unwrap();
-                    (0..10).find_map(|_| {
-                        let x = p.x + (r() * 10.0) as i32 - 5;
-                        let z = p.z + (r() * 10.0) as i32 - 5;
-                        mobs::spawn_spot_at(&mut world, x, z, p.y + 4, 3)
-                    })
-                };
-                if let Some(at) = spot {
-                    let eid = mobs::spawn(server, Dimension::Overworld, MobKind::Warden, at);
-                    sound::entity(server, eid, "entity.warden.emerge", sound::HOSTILE, 1.0, 1.0);
-                }
-            }
-        } else {
-            let warn = ["", "entity.warden.nearby_close", "entity.warden.nearby_closer", "entity.warden.nearby_closest"][level.min(3) as usize];
-            if !warn.is_empty() {
-                sound::at(server, Dimension::Overworld, s.pos, warn, sound::HOSTILE, 1.0, 1.0);
-            }
+        }
+    } else {
+        let warn = ["", "entity.warden.nearby_close", "entity.warden.nearby_closer", "entity.warden.nearby_closest"][level.min(3) as usize];
+        if !warn.is_empty() {
+            sound::at(server, Dimension::Overworld, pos, warn, sound::HOSTILE, 1.0, 1.0);
         }
     }
 }

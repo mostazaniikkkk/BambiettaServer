@@ -185,6 +185,10 @@ impl Registries {
         self.entity_ids.get(name).copied().unwrap_or(0)
     }
 
+    pub fn has_entity(&self, name: &str) -> bool {
+        self.entity_ids.contains_key(name)
+    }
+
     pub fn item_id(&self, name: &str) -> Option<i32> {
         self.item_by_name.get(name.strip_prefix("minecraft:").unwrap_or(name)).copied()
     }

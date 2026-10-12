@@ -137,6 +137,7 @@ pub mod id {
         pub const CLIENT_COMMAND: i32 = 0x08;
         pub const SETTINGS: i32 = 0x09;
         pub const ENCHANT_ITEM: i32 = 0x0c;
+        pub const SET_BEACON_EFFECT: i32 = 0x2b;
         pub const WINDOW_CLICK: i32 = 0x0d;
         pub const CLOSE_WINDOW: i32 = 0x0e;
         pub const USE_ENTITY: i32 = 0x13;

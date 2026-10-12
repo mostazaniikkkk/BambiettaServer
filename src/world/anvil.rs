@@ -164,7 +164,7 @@ fn nbt_to_state(n: &Nbt) -> u16 {
 
 // ---------- items and block entities ----------
 
-fn item_to_nbt(slot: usize, item: &ItemStack) -> Nbt {
+pub(crate) fn item_to_nbt(slot: usize, item: &ItemStack) -> Nbt {
     let mut c = Nbt::compound()
         .with("Slot", Nbt::Byte(slot as i8))
         .with("id", Nbt::str(&format!("minecraft:{}", item.name())))
@@ -182,7 +182,7 @@ fn single_item(n: Option<&Nbt>) -> Slot {
     Some(ItemStack { id, count: n.get_i64("Count").unwrap_or(1).max(1) as i8, nbt: n.get("tag").cloned().map(Box::new) })
 }
 
-fn items_from_nbt(list: Option<&Nbt>, len: usize) -> Vec<Slot> {
+pub(crate) fn items_from_nbt(list: Option<&Nbt>, len: usize) -> Vec<Slot> {
     let reg = data::get();
     let mut out = vec![None; len];
     for e in list.map(Nbt::as_list).unwrap_or(&[]) {
@@ -208,6 +208,8 @@ fn be_id(block: &str) -> &str {
         "mob_spawner"
     } else if block == "bee_nest" {
         "beehive"
+    } else if block.ends_with("shulker_box") {
+        "shulker_box"
     } else {
         block
     }
@@ -244,6 +246,17 @@ fn block_entity_to_nbt(pos: BlockPos, be: &BlockEntity, block: &str) -> Nbt {
             None => base,
         },
         BlockEntity::Comparator(out) => base.with("OutputSignal", Nbt::Int(*out as i32)),
+        BlockEntity::Beacon { primary, secondary } => {
+            let mut n = base;
+            if let Some(p) = primary {
+                n.set("primary_effect", Nbt::str(&format!("minecraft:{}", crate::server::effects::name(*p))));
+            }
+            if let Some(s) = secondary {
+                n.set("secondary_effect", Nbt::str(&format!("minecraft:{}", crate::server::effects::name(*s))));
+            }
+            n
+        }
+        BlockEntity::Conduit => base,
         BlockEntity::Spawner { delay, .. } => {
             let mut n = base.with("Delay", Nbt::Short(*delay as i16));
             if let Some(Nbt::Compound(fields)) = be.client_nbt() {
@@ -269,12 +282,17 @@ fn block_entity_from_nbt(n: &Nbt) -> Option<(BlockPos, BlockEntity)> {
     let pos = BlockPos::new(n.get_i64("x")? as i32, n.get_i64("y")? as i32, n.get_i64("z")? as i32);
     let id = n.get_str("id")?.trim_start_matches("minecraft:");
     let be = match id {
-        "chest" | "trapped_chest" | "barrel" => BlockEntity::Container(items_from_nbt(n.get("Items"), 27)),
+        "chest" | "trapped_chest" | "barrel" | "shulker_box" => BlockEntity::Container(items_from_nbt(n.get("Items"), 27)),
         "hopper" => BlockEntity::Container(items_from_nbt(n.get("Items"), 5)),
         "dispenser" | "dropper" => BlockEntity::Container(items_from_nbt(n.get("Items"), 9)),
         "jukebox" => BlockEntity::Jukebox(single_item(n.get("RecordItem"))),
         "lectern" => BlockEntity::Lectern { book: single_item(n.get("Book")), page: n.get_i64("Page").unwrap_or(0) as i32 },
         "comparator" => BlockEntity::Comparator(n.get_i64("OutputSignal").unwrap_or(0).clamp(0, 15) as u8),
+        "beacon" => BlockEntity::Beacon {
+            primary: n.get_str("primary_effect").and_then(crate::server::effects::id),
+            secondary: n.get_str("secondary_effect").and_then(crate::server::effects::id),
+        },
+        "conduit" => BlockEntity::Conduit,
         "furnace" | "smoker" | "blast_furnace" => {
             let burn = n.get_i64("BurnTime").unwrap_or(0) as i32;
             BlockEntity::Furnace(Furnace {

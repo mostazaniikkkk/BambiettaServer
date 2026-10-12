@@ -4,6 +4,7 @@ import { once } from 'node:events'
 const [host = '127.0.0.1', port = '25565'] = process.argv.slice(2)
 let t = Date.now()
 const a = mineflayer.createBot({ host, port: Number(port), username: 'Bench', version: '1.20.4', auth: 'offline' })
+a._client.on('registry_data', p => a.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await once(a, 'spawn'); await a.waitForChunksToLoad().catch(() => {})
 console.log(`entrada + chunks: ${Date.now() - t} ms, ${Object.keys(a.world.async.columns).length} columnas`)
 a.chat('/gamemode creative')

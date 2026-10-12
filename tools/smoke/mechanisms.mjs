@@ -15,6 +15,7 @@ const until = async (fn, ms = 4000) => { const t = Date.now(); while (Date.now()
 const step = async (name, fn) => { try { await fn() } catch (e) { check(false, `${name}: ${e.message}`) } }
 
 const a = mineflayer.createBot({ host, port, username: 'Mechanic', version: '1.20.4', auth: 'offline' })
+a._client.on('registry_data', p => a.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await once(a, 'spawn'); await a.waitForChunksToLoad().catch(() => {})
 a.chat('/gamemode creative')
 a.chat('/tp 4000.5 130 4000.5'); await sleep(1500); await a.waitForChunksToLoad().catch(() => {})

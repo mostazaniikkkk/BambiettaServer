@@ -5,6 +5,9 @@ import { once } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { Vec3 } from 'vec3'
 
+// mineflayer race with fast servers: registry data can arrive before its plugins load.
+const fixRace = b => { b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)); return b }
+
 const host = process.argv[2] ?? '127.0.0.1'
 const port = Number(process.argv[3] ?? 25565)
 const version = '1.20.4'
@@ -12,7 +15,7 @@ let failures = 0
 const check = (ok, msg) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${msg}`); if (!ok) failures++ }
 const until = async (fn, ms = 5000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await sleep(100) } return false }
 const count = (bot, name) => bot.inventory.items().filter(i => i.name === name).reduce((a, i) => a + i.count, 0)
-const bot = (username) => { const b = mineflayer.createBot({ host, port, username, version, auth: 'offline' }); b.on('kicked', r => console.log(username, 'kicked', r)); return b }
+const bot = (username) => { const b = fixRace(mineflayer.createBot({ host, port, username, version, auth: 'offline' })); b.on('kicked', r => console.log(username, 'kicked', r)); return b }
 const freeSpot = (b) => b.findBlock({ matching: x => x.boundingBox === 'block', maxDistance: 4,
   useExtraInfo: x => b.blockAt(x.position.offset(0, 1, 0))?.name === 'air' && b.blockAt(x.position.offset(0, 2, 0))?.name === 'air' && x.position.distanceTo(b.entity.position) > 2 })
 

@@ -97,6 +97,35 @@ pub struct World {
     epoch: u64,
     /// Observers whose watched block changed (redstone picks them up every tick).
     pub observer_hits: Vec<BlockPos>,
+    /// Spots where a block may start to fall (gravity blocks, stalactites).
+    pub falls: Vec<BlockPos>,
+    /// Scaffolding next to a change (its support may have changed).
+    pub scaffold: Vec<BlockPos>,
+}
+
+/// Blocks with gravity (they fall when nothing holds them up).
+pub fn gravity_block(name: &str) -> bool {
+    matches!(name, "sand" | "red_sand" | "gravel" | "anvil" | "chipped_anvil" | "damaged_anvil" | "dragon_egg" | "suspicious_sand" | "suspicious_gravel") || name.ends_with("_concrete_powder")
+}
+
+/// Per state: may it fall (gravity blocks and pointed dripstone)?
+fn falls_table() -> &'static Vec<u8> {
+    static T: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    T.get_or_init(|| {
+        let reg = crate::data::get();
+        (0..reg.state_count() as u16)
+            .map(|s| {
+                let n = reg.block_of_state(s).name.as_str();
+                if gravity_block(n) || n == "pointed_dripstone" {
+                    1
+                } else if n == "scaffolding" {
+                    2
+                } else {
+                    0
+                }
+            })
+            .collect()
+    })
 }
 
 /// Loads a chunk from disk or generates it. Needs no access to the loaded chunks.
@@ -138,7 +167,7 @@ impl World {
         let dir = PathBuf::from(&cfg.world_folder);
         std::fs::create_dir_all(dir.join(dim.folder()).join("region"))?;
         let source = Arc::new(ChunkSource { generator: Generator::for_dimension(dim, &cfg.generation), dir: dir.clone(), dim });
-        Ok(Self { dim, chunks: HashMap::new(), source, dir, epoch: 0, observer_hits: Vec::new() })
+        Ok(Self { dim, chunks: HashMap::new(), source, dir, epoch: 0, observer_hits: Vec::new(), falls: Vec::new(), scaffold: Vec::new() })
     }
 
     /// Flat world in a temporary folder (tests).
@@ -282,6 +311,15 @@ impl World {
         let old = self.chunk(p.x >> 4, p.z >> 4).set((p.x & 15) as usize, p.y, (p.z & 15) as usize, state);
         if old != state {
             self.notify_observers(p);
+            // The block itself, the one above and the one below may now fall.
+            let t = falls_table();
+            for q in [p, BlockPos::new(p.x, p.y + 1, p.z), BlockPos::new(p.x, p.y - 1, p.z), BlockPos::new(p.x + 1, p.y, p.z), BlockPos::new(p.x - 1, p.y, p.z), BlockPos::new(p.x, p.y, p.z + 1), BlockPos::new(p.x, p.y, p.z - 1)] {
+                match self.peek_block(q).map(|s| t.get(s as usize).copied().unwrap_or(0)) {
+                    Some(1) if q.x == p.x && q.z == p.z => self.falls.push(q),
+                    Some(2) => self.scaffold.push(q),
+                    _ => {}
+                }
+            }
         }
         old
     }
@@ -488,6 +526,11 @@ impl World {
     /// Block entity without marking its chunk for saving (reading only).
     pub fn peek_block_entity(&mut self, p: BlockPos) -> Option<&blockentity::BlockEntity> {
         self.chunk(p.x >> 4, p.z >> 4).block_entities.get(&p)
+    }
+
+    /// Loaded block entities matching `pred`.
+    pub fn loaded_where(&self, pred: impl Fn(&blockentity::BlockEntity) -> bool) -> Vec<BlockPos> {
+        self.chunks.values().flat_map(|c| c.block_entities.iter().filter(|(_, be)| pred(be)).map(|(p, _)| *p)).collect()
     }
 
     /// Loaded containers whose block is one of `names` (hoppers...).

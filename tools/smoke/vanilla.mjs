@@ -5,6 +5,9 @@ import { once } from 'node:events'
 import { setTimeout as sleep } from 'node:timers/promises'
 import { Vec3 } from 'vec3'
 
+// mineflayer race with fast servers: registry data can arrive before its plugins load.
+const fixRace = b => { b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)); return b }
+
 const host = process.argv[2] ?? '127.0.0.1'
 const port = Number(process.argv[3] ?? 25565)
 const version = '1.20.4'
@@ -13,7 +16,7 @@ const check = (ok, msg) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${msg}`); if (
 const until = async (fn, ms = 5000) => { const t = Date.now(); while (Date.now() - t < ms) { if (await fn()) return true; await sleep(100) } return false }
 const count = (b, name) => b.inventory.items().filter(i => i.name === name).reduce((a, i) => a + i.count, 0)
 const find = (b, name) => b.inventory.items().find(i => i.name === name)
-const mk = (username) => { const b = mineflayer.createBot({ host, port, username, version, auth: 'offline' }); b.on('kicked', r => console.log(username, 'kicked', r)); return b }
+const mk = (username) => { const b = fixRace(mineflayer.createBot({ host, port, username, version, auth: 'offline' })); b.on('kicked', r => console.log(username, 'kicked', r)); return b }
 const step = async (name, fn) => { try { await fn() } catch (e) { check(false, `${name}: ${e.message}`) } }
 
 const a = mk('Tester')

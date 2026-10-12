@@ -12,6 +12,7 @@ const until = async (f, ms) => { for (const end = Date.now() + ms; Date.now() < 
 const name = 'Ach' + Math.floor(Math.random() * 1e6)
 const join = async () => {
   const b = mineflayer.createBot({ host, port, username: name, version: '1.20.4', auth: 'offline' })
+  b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
   b.tree = 0
   b.done = new Set()
   b._client.on('advancements', p => {

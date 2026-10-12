@@ -14,7 +14,7 @@ pub fn health_packet(health: f32, food: i32, saturation: f32) -> Vec<u8> {
     p
 }
 
-fn send_health(player: &Player) {
+pub(super) fn send_health(player: &Player) {
     let p = {
         let s = player.state.lock().unwrap();
         health_packet(s.health, s.food, s.saturation)
@@ -308,6 +308,7 @@ pub fn die(server: &Arc<Server>, player: &Arc<Player>, msg: &str) {
             (st.xp_level, st.xp_progress, st.xp_total) = (0, 0.0, 0);
         }
         player.send(super::experience::packet_for(&st));
+        st.last_death = Some((player.dim(), crate::protocol::BlockPos::new(st.x.floor() as i32, st.y.floor() as i32, st.z.floor() as i32)));
         st.dead = true;
         st.health = 0.0;
         st.eating = None;
@@ -348,8 +349,11 @@ pub fn die(server: &Arc<Server>, player: &Arc<Player>, msg: &str) {
 /// Respawns at spawn after pressing "Respawn".
 pub async fn respawn(server: &Arc<Server>, player: &Arc<Player>) {
     let spawn = server.spawn;
-    // Next to their bed if they have one; otherwise, the world spawn point.
-    let [x, y, z] = super::beds::respawn_point(server, player).unwrap_or([spawn.x as f64 + 0.5, spawn.y as f64, spawn.z as f64 + 0.5]);
+    // At their respawn anchor in the Nether, next to their bed if they have one; otherwise,
+    // the world spawn point.
+    let anchored = if player.state.lock().unwrap().spawn_dim == crate::world::Dimension::Nether { super::household::anchor_point(server, player) } else { None };
+    let dim = if anchored.is_some() { crate::world::Dimension::Nether } else { crate::world::Dimension::Overworld };
+    let [x, y, z] = anchored.or_else(|| super::beds::respawn_point(server, player)).unwrap_or([spawn.x as f64 + 0.5, spawn.y as f64, spawn.z as f64 + 0.5]);
     let game_mode = {
         let mut st = player.state.lock().unwrap();
         if !st.dead {
@@ -368,11 +372,12 @@ pub async fn respawn(server: &Arc<Server>, player: &Arc<Player>) {
         st.view_epoch = st.view_epoch.wrapping_add(1);
         st.game_mode
     };
-    // Always respawn in the Overworld.
-    player.set_dim(crate::world::Dimension::Overworld);
+    player.set_dim(dim);
     let mut p = packet(id::play::RESPAWN);
-    p.string("minecraft:overworld").string("minecraft:overworld").i64(server.config.generation.options.seed);
-    p.i8(game_mode as i8).u8(255).bool(false).bool(server.config.generation.name == "flat").bool(false).varint(0).u8(0);
+    p.string(dim.name()).string(dim.name()).i64(server.config.generation.options.seed);
+    p.i8(game_mode as i8).u8(255).bool(false).bool(dim == crate::world::Dimension::Overworld && server.config.generation.name == "flat");
+    super::gadgets::death_location(&mut p, player.state.lock().unwrap().last_death);
+    p.varint(0).u8(0);
     player.send(p);
     player.send(super::play::abilities(game_mode));
     send_health(player);
@@ -381,6 +386,7 @@ pub async fn respawn(server: &Arc<Server>, player: &Arc<Player>) {
     super::border::send_state(server, player);
     super::leads::send_knots(server, player);
     super::frames::send_all(player);
+    super::decor::send_all(player);
     let (inv, xp) = {
         let mut st = player.state.lock().unwrap();
         (st.inv.window_items(), super::experience::packet_for(&st))
@@ -485,6 +491,7 @@ fn finish_eating(player: &Player, st: &mut super::PlayerState, hand: i32) -> Opt
 pub fn tick(server: &Arc<Server>, player: &Arc<Player>, age: i64) {
     super::portals::tick_player(server, player);
     super::gateways::check(server, player);
+    super::blockmech::freeze_player(server, player, age);
     super::effects::tick(server, player);
     let mut leftovers = Vec::new();
     let mut drop_parrot = false;

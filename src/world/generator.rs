@@ -94,6 +94,7 @@ impl Generator {
             return match kind {
                 "fortress" => n.nearest_fortress(x, z, 6),
                 "bastion" => n.bastions.nearest(n.seed, x, z, 6, &|x, z, r| n.build_bastion(x, z, r)),
+                "ruined_portal" => n.portals.nearest(n.seed, x, z, 6, &|x, z, r| n.build_portal(x, z, r)),
                 _ => None,
             };
         }
@@ -106,7 +107,16 @@ impl Generator {
             "stronghold" => g.strongholds().iter().min_by_key(|(sx, sz)| ((*sx - x) as i64).pow(2) + ((*sz - z) as i64).pow(2)).map(|&(sx, sz)| (sx, g.stronghold_floor(sx, sz), sz)),
             "village" => g.village_centers_near(x, z, 2000).into_iter().min_by_key(|(vx, vz)| ((*vx - x) as i64).pow(2) + ((*vz - z) as i64).pow(2)).map(|(vx, vz)| (vx, g.height(vx, vz), vz)),
             "dungeon" => g.dungeon_near(x, z, 24),
+            "deep_dark" => g.nearest_deep_dark(x, z),
             _ => None,
+        }
+    }
+
+    /// Whether (x, y, z) is in the deep dark (no mob spawns there).
+    pub fn deep_dark(&self, x: i32, y: i32, z: i32) -> bool {
+        match self {
+            Generator::Overworld(g) => y < 0 && g.deep_dark_at(x, z),
+            _ => false,
         }
     }
 
@@ -128,7 +138,7 @@ impl Generator {
         let (cx, cz) = (x >> 4, z >> 4);
         match self {
             Generator::Overworld(g) => g.features_near(cx, cz),
-            Generator::Nether(n) => n.bastions.near(n.seed, cx, cz, &|x, z, r| n.build_bastion(x, z, r)),
+            Generator::Nether(n) => n.sites_near(cx, cz),
             Generator::End(e) => e.cities.near(e.seed, cx, cz, &|x, z, r| e.build_city(x, z, r)),
             Generator::Flat(_) => vec![],
         }
@@ -506,10 +516,13 @@ pub enum Feature {
     RuinedPortal,
     Monument,
     AncientCity,
+    Igloo,
+    SwampHut,
+    Mansion,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 9] = [
+    pub const ALL: [Feature; 12] = [
         Feature::Pyramid,
         Feature::Outpost,
         Feature::Mineshaft,
@@ -519,6 +532,9 @@ impl Feature {
         Feature::RuinedPortal,
         Feature::Monument,
         Feature::AncientCity,
+        Feature::Igloo,
+        Feature::SwampHut,
+        Feature::Mansion,
     ];
 
     /// (region size in chunks, salt)
@@ -533,6 +549,9 @@ impl Feature {
             Feature::RuinedPortal => (25, 0x9071),
             Feature::Monument => (32, 0x3013),
             Feature::AncientCity => (24, 0xa1c1),
+            Feature::Igloo => (24, 0x1910),
+            Feature::SwampHut => (20, 0x5a17),
+            Feature::Mansion => (64, 0x3a45),
         }
     }
 
@@ -541,7 +560,7 @@ impl Feature {
         match self {
             Feature::Mineshaft => 110,
             Feature::AncientCity => 48,
-            Feature::Monument => 40,
+            Feature::Monument | Feature::Mansion => 40,
             _ => 32,
         }
     }
@@ -557,6 +576,9 @@ impl Feature {
             Feature::RuinedPortal => "ruined_portal",
             Feature::Monument => "monument",
             Feature::AncientCity => "ancient_city",
+            Feature::Igloo => "igloo",
+            Feature::SwampHut => "swamp_hut",
+            Feature::Mansion => "mansion",
         }
     }
 
@@ -661,6 +683,9 @@ impl Overworld {
             Feature::RuinedPortal if !ocean && !biome.water() && g > SEA_LEVEL && (r >> 32) % 2 == 0 => Some(b::ruined_portal(x, z, low, seed)),
             Feature::Monument if matches!(biome, Ocean | DeepOcean) && g < SEA_LEVEL - 12 => Some(b::monument(x, z, g, SEA_LEVEL, seed)),
             Feature::AncientCity if (r >> 24) % 2 == 0 => Some(b::ancient_city(x, z, -51, seed)),
+            Feature::Igloo if matches!(biome, SnowyPlains | SnowyTaiga) && flat <= 4 && g > SEA_LEVEL => Some(b::igloo(x, z, low, seed)),
+            Feature::SwampHut if biome == Swamp && flat <= 4 => Some(b::swamp_hut(x, z, low)),
+            Feature::Mansion if biome == DarkForest && flat <= 10 && g > SEA_LEVEL => Some(b::mansion(x, z, low, seed)),
             Feature::Pyramid if biome == Desert && flat <= 5 && g > SEA_LEVEL => Some(super::structures::desert_pyramid(x, z, *heights.iter().min().unwrap())),
             Feature::Outpost
                 if matches!(biome, Plains | SunflowerPlains | Savanna | Desert | Taiga | SnowyPlains) && flat <= 6 && g > SEA_LEVEL && (r >> 40) % 3 != 0 && self.village_centers_near(x, z, 200).is_empty() =>
@@ -861,6 +886,36 @@ impl Overworld {
         }
     }
 
+    /// Deep dark patches: wide areas deep underground.
+    pub fn deep_dark_at(&self, x: i32, z: i32) -> bool {
+        self.noise.fbm2(41, x as f64 / 140.0, z as f64 / 140.0) > DEEP_DARK
+    }
+
+    /// The deep dark cavern's ceiling at (x, z) (its floor is at `DEEP_DARK_FLOOR`).
+    fn deep_dark_ceiling(&self, x: i32, z: i32) -> i32 {
+        let edge = ((self.noise.fbm2(41, x as f64 / 140.0, z as f64 / 140.0) - DEEP_DARK) * 60.0).min(1.0);
+        DEEP_DARK_FLOOR + 2 + ((5.0 + self.noise.n2(42, x as f64 / 9.0, z as f64 / 9.0) * 6.0) * edge) as i32
+    }
+
+    /// The nearest deep dark floor (searched on a 16-block grid).
+    fn nearest_deep_dark(&self, x: i32, z: i32) -> Option<(i32, i32, i32)> {
+        for r in 0..120i32 {
+            for dx in -r..=r {
+                for dz in -r..=r {
+                    if dx.abs() != r && dz.abs() != r {
+                        continue;
+                    }
+                    let (px, pz) = (x + dx * 16, z + dz * 16);
+                    // Well inside the patch, where the cavern is tall enough.
+                    if self.deep_dark_at(px, pz) && self.deep_dark_ceiling(px, pz) > DEEP_DARK_FLOOR + 4 {
+                        return Some((px, DEEP_DARK_FLOOR + 1, pz));
+                    }
+                }
+            }
+        }
+        None
+    }
+
     /// Cave fields at a lattice cell: [caverns, tunnel A, tunnel B, stone variant].
     fn cave_lattice(&self, lx: i32, ly: i32, lz: i32) -> [f32; 4] {
         let n = &self.noise;
@@ -947,6 +1002,9 @@ impl Overworld {
             }
         }
 
+        // 3b. The deep dark: a wide cavern floored with sculk, sensors and shriekers.
+        self.deep_dark(&mut c, x0, z0);
+
         // 4. Trees (from this chunk and from neighbors that reach into it).
         let leaves_like = |s: u16| {
             let n = &block_of(s).name;
@@ -1000,6 +1058,51 @@ impl Overworld {
             s.apply(&mut c, cx, cz, self.seed);
         }
         c
+    }
+
+    fn deep_dark(&self, c: &mut Chunk, x0: i32, z0: i32) {
+        let reg = data::get();
+        if !(0..16).step_by(5).any(|x| (0..16).step_by(5).any(|z| self.deep_dark_at(x0 + x, z0 + z))) {
+            return;
+        }
+        let biome = reg.biome_id("deep_dark");
+        let (sculk, vein, sensor, catalyst) = (st("sculk"), st("sculk_vein"), st("sculk_sensor"), st("sculk_catalyst"));
+        let shrieker = with("sculk_shrieker", &[("can_summon", "true")]);
+        let (deepslate, air) = (self.b.deepslate, self.b.air);
+        for x in 0..16 {
+            for z in 0..16 {
+                let (wx, wz) = (x0 + x as i32, z0 + z as i32);
+                if !self.deep_dark_at(wx, wz) {
+                    continue;
+                }
+                if x % 4 == 2 && z % 4 == 2 {
+                    for y in (MIN_Y..0).step_by(4) {
+                        c.set_biome_at(x / 4, y, z / 4, biome);
+                    }
+                }
+                let top = self.deep_dark_ceiling(wx, wz);
+                if top <= DEEP_DARK_FLOOR + 1 {
+                    continue;
+                }
+                for y in DEEP_DARK_FLOOR + 1..top {
+                    c.set(x, y, z, air);
+                }
+                c.set(x, top, z, deepslate);
+                let r = unit(hash(self.seed ^ 0xdd, wx as i64, DEEP_DARK_FLOOR as i64, wz as i64));
+                c.set(x, DEEP_DARK_FLOOR, z, if r < 0.85 { sculk } else { deepslate });
+                let on = DEEP_DARK_FLOOR + 1;
+                let decor = match r {
+                    r if r < 0.012 => sensor,
+                    r if r < 0.016 => shrieker,
+                    r if r < 0.017 => catalyst,
+                    r if r > 0.93 => vein,
+                    _ => air,
+                };
+                if decor != air {
+                    c.set(x, on, z, decor);
+                }
+            }
+        }
     }
 
     /// Solid subsurface and surface block for the biome.
@@ -1561,7 +1664,12 @@ pub struct NetherGen {
     fortresses: Mutex<HashMap<(i32, i32), Option<Arc<super::structures::Structure>>>>,
     /// Bastion remnants.
     pub bastions: Sites,
+    pub portals: Sites,
 }
+
+/// Deep dark patches: where the patch noise is above this, and the cavern floor.
+const DEEP_DARK: f64 = 0.66;
+const DEEP_DARK_FLOOR: i32 = -50;
 
 /// Nether fortresses: one in two of every three regions of 20x20 chunks, deck at y 66.
 const FORTRESS_REGION: i32 = 20;
@@ -1569,7 +1677,7 @@ const FORTRESS_Y: i32 = 66;
 
 impl NetherGen {
     fn new(seed: u64) -> Self {
-        Self { seed: seed ^ 0x6e65_7468, noise: Noise { seed: seed ^ 0x6e65_7468 }, fortresses: Mutex::new(HashMap::new()), bastions: Sites::new(22, 0xba57, 24) }
+        Self { seed: seed ^ 0x6e65_7468, noise: Noise { seed: seed ^ 0x6e65_7468 }, fortresses: Mutex::new(HashMap::new()), bastions: Sites::new(22, 0xba57, 24), portals: Sites::new(14, 0x9072, 12) }
     }
 
     /// A bastion in one of every two regions, away from fortresses.
@@ -1578,6 +1686,26 @@ impl NetherGen {
             return None;
         }
         Some(super::buildings::bastion(x, z, 48, self.seed ^ r))
+    }
+
+    /// A ruined portal in one of every two regions, in a cave somewhere between the lava sea
+    /// and the roof, away from fortresses and bastions.
+    fn build_portal(&self, x: i32, z: i32, r: u64) -> Option<super::structures::Structure> {
+        if r % 2 != 0 || !self.fortresses_near(x >> 4, z >> 4).iter().all(|f| !f.contains(x, FORTRESS_Y, z, 16)) {
+            return None;
+        }
+        if !self.bastions.near(self.seed, x >> 4, z >> 4, &|x, z, r| self.build_bastion(x, z, r)).iter().all(|b| !b.contains(x, 48, z, 16)) {
+            return None;
+        }
+        let y = 34 + ((r >> 8) % 50) as i32;
+        Some(super::buildings::ruined_portal_nether(x, z, y, self.seed ^ r))
+    }
+
+    /// Structures near chunk (cx, cz) with mobs or frames to place (bastions), or to find.
+    pub fn sites_near(&self, cx: i32, cz: i32) -> Vec<Arc<super::structures::Structure>> {
+        let mut out = self.bastions.near(self.seed, cx, cz, &|x, z, r| self.build_bastion(x, z, r));
+        out.extend(self.portals.near(self.seed, cx, cz, &|x, z, r| self.build_portal(x, z, r)));
+        out
     }
 
     fn fortress(&self, rx: i32, rz: i32) -> Option<Arc<super::structures::Structure>> {
@@ -1700,7 +1828,7 @@ impl NetherGen {
         for f in self.fortresses_near(cx, cz) {
             f.apply(&mut c, cx, cz, self.seed);
         }
-        for b in self.bastions.near(self.seed, cx, cz, &|x, z, r| self.build_bastion(x, z, r)) {
+        for b in self.sites_near(cx, cz) {
             b.apply(&mut c, cx, cz, self.seed);
         }
         c

@@ -5,6 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { Vec3 } from 'vec3'
 const [host, port, save] = process.argv.slice(2)
 const a = mineflayer.createBot({ host, port: Number(port), username: 'Checker', version: '1.20.4', auth: 'offline' })
+a._client.on('registry_data', p => a.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await once(a, 'spawn'); await a.waitForChunksToLoad().catch(() => {}); await sleep(1000)
 a.chat('/tp 8 120 8'); await sleep(1500); await a.waitForChunksToLoad().catch(() => {})
 const out = []

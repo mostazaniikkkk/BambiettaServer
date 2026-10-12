@@ -14,8 +14,10 @@ pub const OFFHAND: usize = 45;
 const MENU_GENERIC_9X3: i32 = 2;
 const MENU_GENERIC_9X6: i32 = 5;
 const MENU_GENERIC_3X3: i32 = 6;
+const MENU_BEACON: i32 = 9;
 pub const MENU_BLAST_FURNACE: i32 = 10;
 const MENU_HOPPER: i32 = 16;
+const MENU_SHULKER_BOX: i32 = 20;
 const MENU_LECTERN: i32 = 17;
 pub const MENU_SMOKER: i32 = 22;
 const MENU_CRAFTING: i32 = 12;
@@ -65,6 +67,15 @@ pub enum WindowKind {
     /// A horse's or llama's inventory: 0 saddle, 1 armor or carpet, then its chest (the
     /// contents belong to the mob; `station.merchant` is its entity id).
     Horse,
+    /// The beacon's payment slot.
+    Beacon,
+    /// A minecart's or boat's chest (false) or a hopper minecart (true): the contents belong
+    /// to the vehicle (`station.merchant` is its entity id).
+    Cart(bool),
+    /// A shulker box (contents stored in the block; no shulker box fits in it).
+    Shulker,
+    /// An ender chest: the player's own ender inventory.
+    Ender,
 }
 
 /// Enchanting table offer.
@@ -95,7 +106,7 @@ pub struct OpenWindow {
 impl WindowKind {
     /// Do the contents live in the block (shared between players)?
     pub fn shared(self) -> bool {
-        matches!(self, WindowKind::Chest(_) | WindowKind::Furnace | WindowKind::Brewing | WindowKind::Hopper | WindowKind::Dispenser)
+        matches!(self, WindowKind::Chest(_) | WindowKind::Furnace | WindowKind::Brewing | WindowKind::Hopper | WindowKind::Dispenser | WindowKind::Shulker)
     }
 
     /// Workstations whose result is computed by `stations`.
@@ -323,11 +334,13 @@ impl Inventory {
             (Loc::Player(i @ 5..=8), _) => armor_slot(item) == Some(i),
             (Loc::Container(1), Some(WindowKind::Furnace)) => gameplay::fuel_ticks(item.name()) > 0 || item.name() == "bucket",
             (Loc::Container(0), Some(WindowKind::Horse)) => item.name() == "saddle",
+            (Loc::Container(0), Some(WindowKind::Beacon)) => super::beacons::is_payment(item.name()),
             (Loc::Container(1), Some(WindowKind::Horse)) => item.name().ends_with("_horse_armor") || item.name().ends_with("_carpet"),
             (Loc::Container(0), Some(WindowKind::Enchanting)) => {
                 (gameplay::enchantability(item) > 0 && !item.is_enchanted()) || item.name() == "book"
             }
             (Loc::Container(1), Some(WindowKind::Enchanting)) => item.name() == "lapis_lazuli",
+            (Loc::Container(_), Some(WindowKind::Shulker)) => !item.name().ends_with("shulker_box"),
             (Loc::Container(i), Some(k)) if k == WindowKind::Brewing || k.station() => super::stations::accepts(k, i, item),
             _ => true,
         }
@@ -335,7 +348,7 @@ impl Inventory {
 
     fn max_in(&self, loc: Loc, item: &ItemStack) -> i8 {
         match (loc, self.window_kind()) {
-            (Loc::Player(5..=8), _) | (Loc::Container(0), Some(WindowKind::Enchanting)) | (Loc::Container(0..=2), Some(WindowKind::Brewing)) | (Loc::Container(0 | 1), Some(WindowKind::Horse)) => 1,
+            (Loc::Player(5..=8), _) | (Loc::Container(0), Some(WindowKind::Enchanting)) | (Loc::Container(0..=2), Some(WindowKind::Brewing)) | (Loc::Container(0 | 1), Some(WindowKind::Horse)) | (Loc::Container(0), Some(WindowKind::Beacon)) => 1,
             _ => item.max_stack(),
         }
     }
@@ -453,7 +466,10 @@ impl Inventory {
             let to = |v: Vec<usize>| v.into_iter().map(Loc::Container).collect::<Vec<_>>();
             match kind {
                 WindowKind::Chest(rows) => return to((0..rows as usize * 9).collect()),
-                WindowKind::Hopper => return to((0..5).collect()),
+                WindowKind::Hopper | WindowKind::Cart(true) => return to((0..5).collect()),
+                WindowKind::Shulker if it.name().ends_with("shulker_box") => return vec![],
+                WindowKind::Shulker | WindowKind::Ender | WindowKind::Cart(false) => return to((0..27).collect()),
+                WindowKind::Beacon if super::beacons::is_payment(it.name()) => return to(vec![0]),
                 WindowKind::Horse if it.name() == "saddle" => return to(vec![0]),
                 WindowKind::Horse if self.accepts(Loc::Container(1), it) => return to(vec![1]),
                 WindowKind::Horse => return to((2..self.container_len()).collect()),
@@ -825,6 +841,11 @@ impl Inventory {
             WindowKind::Dispenser => MENU_GENERIC_3X3,
             WindowKind::Lectern => MENU_LECTERN,
             WindowKind::Horse => MENU_GENERIC_9X3,
+            WindowKind::Beacon => MENU_BEACON,
+            WindowKind::Cart(true) => MENU_HOPPER,
+            WindowKind::Cart(false) => MENU_GENERIC_9X3,
+            WindowKind::Shulker => MENU_SHULKER_BOX,
+            WindowKind::Ender => MENU_GENERIC_9X3,
         });
         let mut p = packet(id::play::OPEN_WINDOW);
         p.varint(id as i32).varint(menu);
@@ -845,6 +866,15 @@ impl Inventory {
         vec![p, self.window_items()]
     }
 
+    /// A vehicle's chest or hopper.
+    pub fn open_cart(&mut self, eid: i32, hopper: bool, slots: Vec<Slot>, title: &str) -> Vec<Vec<u8>> {
+        let out = self.open(WindowKind::Cart(hopper), BlockPos::new(0, 0, 0), slots, title);
+        if let Some(w) = self.window.as_mut() {
+            w.station.merchant = eid;
+        }
+        out
+    }
+
     pub fn open_crafting_table(&mut self, pos: BlockPos) -> Vec<Vec<u8>> {
         self.open(WindowKind::Crafting, pos, vec![None; 10], "Mesa de crafteo")
     }
@@ -854,7 +884,7 @@ impl Inventory {
     pub fn close(&mut self) -> Vec<ItemStack> {
         let mut back: Vec<ItemStack> = Vec::new();
         // Whatever was put in tables and workstations goes back to the player (except the result).
-        if let Some(w) = self.window.as_mut().filter(|w| !w.kind.shared() && !matches!(w.kind, WindowKind::Lectern | WindowKind::Horse)) {
+        if let Some(w) = self.window.as_mut().filter(|w| !w.kind.shared() && !matches!(w.kind, WindowKind::Lectern | WindowKind::Horse | WindowKind::Cart(_) | WindowKind::Ender)) {
             let result = w.kind.result_slot();
             back.extend(w.slots.iter_mut().enumerate().filter(|(i, _)| Some(*i) != result).filter_map(|(_, s)| s.take()));
         }
@@ -956,7 +986,7 @@ impl Inventory {
         let mut out: Vec<ItemStack> = self.slots.iter_mut().filter_map(Option::take).collect();
         out.extend(self.cursor.take());
         // Chest and furnace contents belong to the block, not the player.
-        if let Some(w) = self.window.as_mut().filter(|w| !w.kind.shared() && !matches!(w.kind, WindowKind::Lectern | WindowKind::Horse)) {
+        if let Some(w) = self.window.as_mut().filter(|w| !w.kind.shared() && !matches!(w.kind, WindowKind::Lectern | WindowKind::Horse | WindowKind::Cart(_) | WindowKind::Ender)) {
             let result = w.kind.result_slot();
             out.extend(w.slots.iter_mut().enumerate().filter(|(i, _)| Some(*i) != result).filter_map(|(_, s)| s.take()));
             w.slots.iter_mut().for_each(|s| *s = None);

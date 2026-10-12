@@ -119,6 +119,10 @@ pub fn open(server: &Arc<Server>, player: &Arc<Player>, pos: BlockPos, block: &B
         "dropper" => (WindowKind::Dispenser, "Soltador"),
         "brewing_stand" => (WindowKind::Brewing, "Soporte para pociones"),
         n if super::stations::open(server, player, pos, n) => return true,
+        "beacon" => {
+            super::beacons::open(server, player, pos);
+            return true;
+        }
         "enchanting_table" => {
             super::enchanting::open(server, player, pos);
             return true;
@@ -213,13 +217,19 @@ fn viewers(server: &Server, dim: Dimension, pos: BlockPos) -> Vec<Arc<Player>> {
 
 /// Lid animation: the parameter is the number of players looking inside.
 pub fn update_lid(server: &Server, dim: Dimension, pos: BlockPos) {
-    let n = viewers(server, dim, pos).len();
+    // Those looking into it (an ender chest's viewers each see their own inventory).
+    let n = server
+        .online()
+        .into_iter()
+        .filter(|p| p.dim() == dim)
+        .filter(|p| p.state.lock().unwrap().inv.window.as_ref().is_some_and(|w| (w.kind.shared() || w.kind == WindowKind::Ender) && (w.pos == pos || w.pos2 == Some(pos))))
+        .count();
     let (state, partner) = {
         let mut world = server.world(dim).lock().unwrap();
         (world.get_block(pos), chest_partner(&mut world, pos))
     };
     let block = data::get().block_of_state(state);
-    if !block.name.ends_with("chest") {
+    if !block.name.ends_with("chest") && !block.name.ends_with("shulker_box") {
         return;
     }
     for at in std::iter::once(pos).chain(partner) {

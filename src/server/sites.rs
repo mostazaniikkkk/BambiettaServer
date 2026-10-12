@@ -1,7 +1,8 @@
 //! Life in structures: the first time a player comes close to an End city, an ocean
 //! monument, a bastion or some ocean ruins, the mobs that live there appear (shulkers, elder
 //! guardians, piglins and brutes, drowned...) and its item frames are hung (the End ship's
-//! elytra). Remembered in `sites.json`, so it only happens once.
+//! elytra), and the igloo's prisoners, the swamp hut's witch and cat and the mansion's
+//! illagers and allays. Remembered in `sites.json`, so it only happens once.
 
 use super::mobs::{self, MobKind, Seen};
 use super::Server;
@@ -52,8 +53,13 @@ pub fn populate(server: &Arc<Server>, seen: &[Seen]) {
     let _ = std::fs::write(file(server), serde_json::to_string(&list).unwrap_or_default());
     for (dim, site) in todo {
         for &(pos, name) in &site.mobs {
+            // `kind:variant` (the swamp hut's black cat).
+            let (name, variant) = name.split_once(':').map_or((name, None), |(n, v)| (n, Some(v)));
             if let Some(kind) = MobKind::from_name(name) {
-                mobs::spawn(server, dim, kind, pos);
+                let eid = mobs::spawn(server, dim, kind, pos);
+                if let (Some("all_black"), Some(m)) = (variant, server.mobs.lock().unwrap().get_mut(&eid)) {
+                    m.variant = 10;
+                }
             }
         }
         for &(pos, facing, item) in &site.frames {

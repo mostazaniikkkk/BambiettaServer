@@ -23,6 +23,10 @@ pub enum BlockEntity {
     Lectern { book: Slot, page: i32 },
     /// Comparator: its output signal (0-15).
     Comparator(u8),
+    /// Beacon: the powers chosen (effect ids).
+    Beacon { primary: Option<i32>, secondary: Option<i32> },
+    /// Conduit (its frame is checked as it goes).
+    Conduit,
 }
 
 /// Brewing stand: 0-2 bottles, 3 ingredient, 4 blaze powder.
@@ -162,12 +166,15 @@ impl BlockEntity {
     pub fn for_block(name: &str) -> Option<BlockEntity> {
         match name {
             "chest" | "trapped_chest" | "barrel" => Some(BlockEntity::Container(vec![None; 27])),
+            n if n.ends_with("shulker_box") => Some(BlockEntity::Container(vec![None; 27])),
             "hopper" => Some(BlockEntity::Container(vec![None; 5])),
             "dispenser" | "dropper" => Some(BlockEntity::Container(vec![None; 9])),
             "furnace" | "smoker" | "blast_furnace" => Some(BlockEntity::Furnace(Furnace::new(Furnace::kind_of(name).unwrap_or(0)))),
             "jukebox" => Some(BlockEntity::Jukebox(None)),
             "lectern" => Some(BlockEntity::Lectern { book: None, page: 0 }),
             "comparator" => Some(BlockEntity::Comparator(0)),
+            "beacon" => Some(BlockEntity::Beacon { primary: None, secondary: None }),
+            "conduit" => Some(BlockEntity::Conduit),
             "brewing_stand" => Some(BlockEntity::Brewing(Brewing { items: vec![None; 5], ..Default::default() })),
             n if n.ends_with("_sign") => Some(BlockEntity::Sign(Sign::default())),
             n if n.ends_with("_banner") => Some(BlockEntity::Banner(vec![])),
@@ -184,7 +191,7 @@ impl BlockEntity {
             BlockEntity::Brewing(b) => b.items.iter().flatten().cloned().collect(),
             BlockEntity::Jukebox(record) => record.iter().cloned().collect(),
             BlockEntity::Lectern { book, .. } => book.iter().cloned().collect(),
-            BlockEntity::Sign(_) | BlockEntity::Banner(_) | BlockEntity::Spawner { .. } | BlockEntity::Hive { .. } | BlockEntity::Comparator(_) => vec![],
+            BlockEntity::Sign(_) | BlockEntity::Banner(_) | BlockEntity::Spawner { .. } | BlockEntity::Hive { .. } | BlockEntity::Comparator(_) | BlockEntity::Beacon { .. } | BlockEntity::Conduit => vec![],
         }
     }
 
@@ -264,6 +271,18 @@ pub struct SavedBlockEntity {
     pub cook: i32,
     #[serde(default)]
     pub xp: f32,
+}
+
+/// The non-empty slots of a list, for saving (with their tags).
+pub fn save_slots(slots: &[Slot]) -> Vec<SavedSlot> {
+    slots
+        .iter()
+        .enumerate()
+        .filter_map(|(slot, s)| {
+            let s = s.as_ref()?;
+            Some(SavedSlot { slot, item: s.name().to_string(), count: s.count, nbt: s.nbt.as_ref().map(|n| n.to_network().iter().map(|b| format!("{b:02x}")).collect()) })
+        })
+        .collect()
 }
 
 pub fn load_slots(saved: &[SavedSlot], len: usize) -> Vec<Slot> {

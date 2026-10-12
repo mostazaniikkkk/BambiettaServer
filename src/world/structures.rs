@@ -64,6 +64,8 @@ pub enum Loot {
     Bastion,
     BastionTreasure,
     AncientCity,
+    Igloo,
+    Mansion,
 }
 
 /// (item, weight, min, max)
@@ -384,6 +386,15 @@ impl Loot {
                     10,
                 ),
                 (&[("soul_torch", 1, 1, 15), ("bone", 1, 1, 15), ("coal", 1, 6, 15)], 1, 1),
+            ],
+            Loot::Igloo => vec![
+                (&[("apple", 3, 1, 3), ("coal", 15, 1, 4), ("gold_nugget", 10, 1, 3), ("stone_axe", 2, 1, 1), ("rotten_flesh", 10, 1, 1), ("emerald", 1, 1, 1), ("wheat", 10, 2, 3)], 2, 8),
+                (&[("golden_apple", 1, 1, 1)], 1, 1),
+            ],
+            Loot::Mansion => vec![
+                (&[("lead", 20, 1, 1), ("golden_apple", 15, 1, 1), ("enchanted_golden_apple", 2, 1, 1), ("music_disc_13", 15, 1, 1), ("music_disc_cat", 15, 1, 1), ("name_tag", 20, 1, 1), ("chainmail_chestplate", 10, 1, 1), ("diamond_hoe", 15, 1, 1), ("diamond_chestplate", 5, 1, 1), ("book", 10, 1, 3)], 1, 3),
+                (&[("iron_ingot", 10, 1, 4), ("gold_ingot", 5, 1, 4), ("bread", 20, 1, 1), ("wheat", 20, 1, 4), ("bucket", 10, 1, 1), ("redstone", 15, 1, 4), ("coal", 15, 1, 4), ("melon_seeds", 10, 2, 4), ("pumpkin_seeds", 10, 2, 4), ("beetroot_seeds", 10, 2, 4)], 1, 4),
+                (&[("bone", 10, 1, 8), ("gunpowder", 10, 1, 8), ("rotten_flesh", 10, 1, 8), ("string", 10, 1, 8)], 3, 3),
             ],
             Loot::Outpost => vec![
                 (&[("crossbow", 1, 1, 1)], 0, 1),

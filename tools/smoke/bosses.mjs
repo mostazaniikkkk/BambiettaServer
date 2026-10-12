@@ -16,6 +16,7 @@ const until = async (fn, ms = 4000) => { const t = Date.now(); while (Date.now()
 const step = async (name, fn) => { try { await fn() } catch (e) { check(false, `${name}: ${e.message}`) } }
 
 const a = mineflayer.createBot({ host, port, username: 'Hunter2', version: '1.20.4', auth: 'offline' })
+a._client.on('registry_data', p => a.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await once(a, 'spawn'); await a.waitForChunksToLoad().catch(() => {})
 const effects = new Set()
 a._client.on('entity_effect', p => { if (p.entityId === a.entity.id) effects.add(a.registry.effects[p.effectId]?.name?.toLowerCase().replace(/_/g, '')) })
@@ -30,7 +31,8 @@ const items = name => Object.values(a.entities).some(e => e.name === 'item' && e
 const arena = async (x, z, floor = 'stone') => {
   a.chat('/gamemode creative'); a.chat('/killmobs all 60'); a.chat('/effect clear')
   a.chat(`/tp ${x}.5 130 ${z}.5`); await sleep(1500)
-  a.chat(`/fill ${x - 12} 99 ${z - 12} ${x + 12} 99 ${z + 12} ${floor}`); a.chat(`/fill ${x - 12} 100 ${z - 12} ${x + 12} 110 ${z + 12} air`); await sleep(600)
+  // Stone under it: sand would fall.
+  a.chat(`/fill ${x - 12} 98 ${z - 12} ${x + 12} 98 ${z + 12} stone`); a.chat(`/fill ${x - 12} 99 ${z - 12} ${x + 12} 99 ${z + 12} ${floor}`); a.chat(`/fill ${x - 12} 100 ${z - 12} ${x + 12} 110 ${z + 12} air`); await sleep(600)
   a.chat(`/tp ${x}.5 100 ${z}.5`); a.chat('/heal'); await sleep(800)
   effects.clear()
 }

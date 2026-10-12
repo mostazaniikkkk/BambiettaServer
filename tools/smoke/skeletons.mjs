@@ -9,6 +9,7 @@ const port = Number(process.argv[3] ?? 25565)
 let failed = 0
 const check = (ok, what) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${what}`); if (!ok) failed++ }
 const b = mineflayer.createBot({ host, port, username: 'Archer', version: '1.20.4', auth: 'offline' })
+b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
 await once(b, 'spawn'); await sleep(1500)
 const Y = 150
 const skeleton = () => Object.values(b.entities).filter(e => e.name === 'skeleton').sort((p, q) => p.position.distanceTo(b.entity.position) - q.position.distanceTo(b.entity.position))[0]

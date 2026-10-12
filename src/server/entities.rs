@@ -112,6 +112,19 @@ pub fn take_in_box(server: &Server, dim: Dimension, min: [f64; 3], max: [f64; 3]
     took
 }
 
+/// Where the nearest dropped item matching `pred` lies (that can already be picked up).
+pub fn nearest_item(server: &Server, dim: Dimension, pos: [f64; 3], radius: f64, pred: impl Fn(&ItemStack) -> bool) -> Option<[f64; 3]> {
+    let d2 = |p: &[f64; 3]| (0..3).map(|i| (p[i] - pos[i]).powi(2)).sum::<f64>();
+    server
+        .items
+        .lock()
+        .unwrap()
+        .values()
+        .filter(|e| e.dim == dim && e.pickup_delay == 0 && d2(&e.pos) < radius * radius && pred(&e.item))
+        .map(|e| e.pos)
+        .min_by(|a, b| d2(a).total_cmp(&d2(b)))
+}
+
 /// Drops a broken block's loot at its center.
 pub fn drop_at_block(server: &Server, dim: Dimension, x: i32, y: i32, z: i32, item: ItemStack) {
     let pos = [x as f64 + 0.5 + (random() as f64 - 0.5) * 0.5, y as f64 + 0.25, z as f64 + 0.5 + (random() as f64 - 0.5) * 0.5];

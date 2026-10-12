@@ -3,10 +3,15 @@
 //! The boat is moved by the client driving it (`vehicle_move`, like vanilla) and the server
 //! only validates and relays. Minecarts are moved by the server along rails with
 //! AbstractMinecart physics (curves, slopes, powered rails on and off).
+//!
+//! Chest boats and chest minecarts carry 27 slots and hopper minecarts 5: the hopper
+//! minecart takes items from the container above it and the items lying around it (unless
+//! it is on a powered activator rail), and a hopper under the rail empties either kind.
 
+use super::inventory::WindowKind;
 use super::{entities, Player, Server};
 use crate::data;
-use crate::item::ItemStack;
+use crate::item::{ItemStack, Slot};
 use crate::protocol::{id, packet, BlockPos, Writer};
 use crate::world::physics::{move_aabb, Aabb};
 use crate::world::{Dimension, World};
@@ -17,15 +22,26 @@ use std::sync::Arc;
 pub enum VehicleKind {
     /// Boat (wood variant, with chest).
     Boat(i32, bool),
-    Minecart,
+    /// Minecart: plain, with a chest or with a hopper.
+    Minecart(Cart),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Cart {
+    Plain,
+    Chest,
+    Hopper,
 }
 
 const BOAT_WOODS: [&str; 9] = ["oak", "spruce", "birch", "jungle", "acacia", "cherry", "dark_oak", "mangrove", "bamboo"];
 
 impl VehicleKind {
     pub fn from_item(name: &str) -> Option<Self> {
-        if name == "minecart" {
-            return Some(VehicleKind::Minecart);
+        match name {
+            "minecart" => return Some(VehicleKind::Minecart(Cart::Plain)),
+            "chest_minecart" => return Some(VehicleKind::Minecart(Cart::Chest)),
+            "hopper_minecart" => return Some(VehicleKind::Minecart(Cart::Hopper)),
+            _ => {}
         }
         let (wood, chest) = match name {
             "bamboo_raft" => ("bamboo", false),
@@ -40,7 +56,9 @@ impl VehicleKind {
 
     fn item(self) -> String {
         match self {
-            VehicleKind::Minecart => "minecart".into(),
+            VehicleKind::Minecart(Cart::Plain) => "minecart".into(),
+            VehicleKind::Minecart(Cart::Chest) => "chest_minecart".into(),
+            VehicleKind::Minecart(Cart::Hopper) => "hopper_minecart".into(),
             VehicleKind::Boat(8, false) => "bamboo_raft".into(),
             VehicleKind::Boat(8, true) => "bamboo_chest_raft".into(),
             VehicleKind::Boat(v, chest) => format!("{}_{}boat", BOAT_WOODS[v as usize], if chest { "chest_" } else { "" }),
@@ -49,7 +67,9 @@ impl VehicleKind {
 
     fn entity(self) -> &'static str {
         match self {
-            VehicleKind::Minecart => "minecart",
+            VehicleKind::Minecart(Cart::Plain) => "minecart",
+            VehicleKind::Minecart(Cart::Chest) => "chest_minecart",
+            VehicleKind::Minecart(Cart::Hopper) => "hopper_minecart",
             VehicleKind::Boat(_, true) => "chest_boat",
             VehicleKind::Boat(..) => "boat",
         }
@@ -57,7 +77,7 @@ impl VehicleKind {
 
     fn size(self) -> (f64, f64) {
         match self {
-            VehicleKind::Minecart => (0.98, 0.7),
+            VehicleKind::Minecart(_) => (0.98, 0.7),
             VehicleKind::Boat(..) => (1.375, 0.5625),
         }
     }
@@ -65,9 +85,23 @@ impl VehicleKind {
     /// Seat height above the vehicle's feet.
     fn seat(self) -> f64 {
         match self {
-            VehicleKind::Minecart => 0.0,
+            VehicleKind::Minecart(_) => 0.0,
             VehicleKind::Boat(..) => -0.1,
         }
+    }
+
+    /// Slots it carries.
+    pub fn slots(self) -> usize {
+        match self {
+            VehicleKind::Minecart(Cart::Chest) | VehicleKind::Boat(_, true) => 27,
+            VehicleKind::Minecart(Cart::Hopper) => 5,
+            _ => 0,
+        }
+    }
+
+    /// Whether someone can ride it.
+    fn rideable(self) -> bool {
+        matches!(self, VehicleKind::Minecart(Cart::Plain) | VehicleKind::Boat(..))
     }
 }
 
@@ -89,6 +123,8 @@ pub struct Vehicle {
     on_ground: bool,
     sent: [f64; 3],
     sent_yaw: f32,
+    /// Contents of its chest or hopper.
+    pub items: Vec<Slot>,
 }
 
 // ---------- packets ----------
@@ -173,6 +209,7 @@ pub fn spawn(server: &Server, dim: Dimension, kind: VehicleKind, pos: [f64; 3], 
         on_ground: false,
         sent: pos,
         sent_yaw: yaw,
+        items: vec![None; kind.slots()],
     };
     let eid = v.eid;
     server.vehicles.lock().unwrap().insert(eid, v);
@@ -192,15 +229,16 @@ pub fn is_rail(name: &str) -> bool {
     matches!(name, "rail" | "powered_rail" | "detector_rail" | "activator_rail")
 }
 
-/// Minecart on a clicked rail.
-pub fn place_minecart(server: &Arc<Server>, player: &Arc<Player>, rail: BlockPos, hand: i32) -> bool {
+/// Minecart (`item`: plain, chest or hopper) on a clicked rail.
+pub fn place_minecart(server: &Arc<Server>, player: &Arc<Player>, item: &str, rail: BlockPos, hand: i32) -> bool {
     let dim = player.dim();
     let name = data::get().block_of_state(server.world(dim).lock().unwrap().get_block(rail)).name.clone();
+    let Some(kind) = VehicleKind::from_item(item) else { return false };
     if !is_rail(&name) {
         return false;
     }
     let yaw = player.state.lock().unwrap().yaw;
-    spawn(server, dim, VehicleKind::Minecart, [rail.x as f64 + 0.5, rail.y as f64 + 0.0625, rail.z as f64 + 0.5], yaw);
+    spawn(server, dim, kind, [rail.x as f64 + 0.5, rail.y as f64 + 0.0625, rail.z as f64 + 0.5], yaw);
     consume_held(player, hand);
     true
 }
@@ -211,7 +249,7 @@ pub fn use_boat(server: &Arc<Server>, player: &Arc<Player>, hand: i32) -> bool {
         let st = player.state.lock().unwrap();
         (st.inv.held(hand, st.held_slot).clone(), st.eye(), st.yaw, st.pitch)
     };
-    let Some(kind) = item.as_ref().and_then(|i| VehicleKind::from_item(i.name())).filter(|k| *k != VehicleKind::Minecart) else { return false };
+    let Some(kind) = item.as_ref().and_then(|i| VehicleKind::from_item(i.name())).filter(|k| matches!(k, VehicleKind::Boat(..))) else { return false };
     let dim = player.dim();
     let hit = {
         let mut world = server.world(dim).lock().unwrap();
@@ -229,7 +267,7 @@ pub fn use_boat(server: &Arc<Server>, player: &Arc<Player>, hand: i32) -> bool {
 
 // ---------- mount, dismount, break ----------
 
-/// Right click on a vehicle: mount it.
+/// Right click on a vehicle: mount it, or open its chest or hopper (a chest boat while sneaking).
 pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32) -> bool {
     let (sneaking, ppos) = {
         let st = player.state.lock().unwrap();
@@ -238,7 +276,24 @@ pub fn interact(server: &Arc<Server>, player: &Arc<Player>, eid: i32) -> bool {
     let packet_out = {
         let mut vs = server.vehicles.lock().unwrap();
         let Some(v) = vs.get_mut(&eid) else { return false };
-        if sneaking || v.passenger.is_some() || v.dim != player.dim() || dist2(&v.pos, &ppos) > 6.0 * 6.0 {
+        if v.dim != player.dim() || dist2(&v.pos, &ppos) > 6.0 * 6.0 {
+            return true;
+        }
+        if !v.items.is_empty() && (sneaking || !v.kind.rideable()) {
+            let (hopper, slots) = (v.kind == VehicleKind::Minecart(Cart::Hopper), v.items.clone());
+            let title = match v.kind {
+                VehicleKind::Minecart(Cart::Hopper) => "Vagoneta con tolva",
+                VehicleKind::Minecart(_) => "Vagoneta con cofre",
+                _ => "Bote con cofre",
+            };
+            drop(vs);
+            let packets = player.state.lock().unwrap().inv.open_cart(eid, hopper, slots, title);
+            for p in packets {
+                player.send(p);
+            }
+            return true;
+        }
+        if sneaking || v.passenger.is_some() || !v.kind.rideable() {
             return true;
         }
         v.passenger = Some(player.eid);
@@ -312,8 +367,150 @@ pub fn attacked(server: &Arc<Server>, player: &Arc<Player>, eid: i32) -> bool {
                 entities::spawn(server, v.dim, [v.pos[0], v.pos[1] + 0.3, v.pos[2]], [0.0, 0.2, 0.0], ItemStack::new(item, 1), 10);
             }
         }
+        // What it carried spills out (also in creative, like vanilla).
+        for it in v.items.iter().flatten() {
+            let r = || (entities::random() as f64 - 0.5) * 0.2;
+            entities::spawn(server, v.dim, [v.pos[0], v.pos[1] + 0.3, v.pos[2]], [r(), 0.2, r()], it.clone(), 10);
+        }
+        close_windows(server, eid);
     }
     true
+}
+
+// ---------- chests and hoppers ----------
+
+/// Players with this vehicle's chest or hopper open.
+fn viewers(server: &Server, eid: i32) -> Vec<Arc<Player>> {
+    server
+        .online()
+        .into_iter()
+        .filter(|p| p.state.lock().unwrap().inv.window.as_ref().is_some_and(|w| matches!(w.kind, WindowKind::Cart(_)) && w.station.merchant == eid))
+        .collect()
+}
+
+fn close_windows(server: &Arc<Server>, eid: i32) {
+    for p in viewers(server, eid) {
+        let left = {
+            let mut st = p.state.lock().unwrap();
+            let mut c = packet(id::play::CLOSE_WINDOW);
+            c.u8(st.inv.window_id());
+            let left = st.inv.close();
+            p.send(c);
+            p.send(st.inv.window_items());
+            left
+        };
+        for item in left {
+            entities::throw_from(server, &p, item);
+        }
+    }
+}
+
+/// Shows the new contents to whoever has the vehicle open.
+fn refresh(server: &Server, eid: i32, items: &[Slot]) {
+    for p in viewers(server, eid) {
+        let pk = {
+            let mut st = p.state.lock().unwrap();
+            let Some(w) = st.inv.window.as_mut() else { continue };
+            if w.slots == items {
+                continue;
+            }
+            w.slots = items.to_vec();
+            st.inv.window_items()
+        };
+        p.send(pk);
+    }
+}
+
+/// After a click in a vehicle's window: its contents follow the window.
+pub fn sync_window(server: &Arc<Server>, player: &Arc<Player>) {
+    let Some((eid, slots)) = ({
+        let st = player.state.lock().unwrap();
+        st.inv.window.as_ref().filter(|w| matches!(w.kind, WindowKind::Cart(_))).map(|w| (w.station.merchant, w.slots.clone()))
+    }) else {
+        return;
+    };
+    {
+        let mut vs = server.vehicles.lock().unwrap();
+        let Some(v) = vs.get_mut(&eid) else { return };
+        v.items = slots.clone();
+    }
+    for p in viewers(server, eid) {
+        if p.eid != player.eid {
+            let pk = {
+                let mut st = p.state.lock().unwrap();
+                let Some(w) = st.inv.window.as_mut() else { continue };
+                w.slots = slots.clone();
+                st.inv.window_items()
+            };
+            p.send(pk);
+        }
+    }
+}
+
+/// Every 4 ticks: hopper minecarts take items in, and hoppers under the rails empty carts.
+fn transfer(server: &Arc<Server>) {
+    let mut changed_carts: Vec<(i32, Vec<Slot>)> = Vec::new();
+    let mut changed_blocks: Vec<(Dimension, BlockPos)> = Vec::new();
+    let mut suck: Vec<(i32, Dimension, [f64; 3])> = Vec::new();
+    {
+        let mut vs = server.vehicles.lock().unwrap();
+        for dim in Dimension::ALL {
+            if !vs.values().any(|v| v.dim == dim && !v.items.is_empty()) {
+                continue;
+            }
+            let mut world = server.world(dim).lock().unwrap();
+            for v in vs.values_mut().filter(|v| v.dim == dim && !v.items.is_empty()) {
+                let block = BlockPos::new(v.pos[0].floor() as i32, v.pos[1].floor() as i32, v.pos[2].floor() as i32);
+                let before = v.items.clone();
+                // A hopper under the rail takes one item out.
+                let below = BlockPos::new(block.x, block.y - 1, block.z);
+                if super::hoppers::cart_into_hopper(&mut world, below, &mut v.items) {
+                    changed_blocks.push((dim, below));
+                }
+                if v.kind == VehicleKind::Minecart(Cart::Hopper) {
+                    let rail = world.get_block(block);
+                    let rb = data::get().block_of_state(rail);
+                    let off = rb.name == "activator_rail" && rb.get(rail, "powered") == Some("true");
+                    if !off {
+                        let above = BlockPos::new(block.x, block.y + 1, block.z);
+                        if super::hoppers::container_into_cart(&mut world, above, &mut v.items) {
+                            changed_blocks.push((dim, above));
+                        } else {
+                            suck.push((v.eid, dim, v.pos));
+                        }
+                    }
+                }
+                if v.items != before {
+                    changed_carts.push((v.eid, v.items.clone()));
+                }
+            }
+        }
+    }
+    // Items lying around a hopper minecart go in.
+    for (eid, dim, pos) in suck {
+        let Some(mut mine) = server.vehicles.lock().unwrap().get(&eid).map(|v| v.items.clone()) else { continue };
+        let min = [pos[0] - 1.0, pos[1] - 0.25, pos[2] - 1.0];
+        let max = [pos[0] + 1.0, pos[1] + 1.5, pos[2] + 1.0];
+        let took = entities::take_in_box(server, dim, min, max, |it| {
+            let mut n = 0;
+            while n < it.count && super::hoppers::add_to(&mut mine, it) {
+                n += 1;
+            }
+            n
+        });
+        if took {
+            if let Some(v) = server.vehicles.lock().unwrap().get_mut(&eid) {
+                v.items = mine.clone();
+            }
+            changed_carts.push((eid, mine));
+        }
+    }
+    for (dim, p) in changed_blocks {
+        super::containers::sync(server, dim, p);
+    }
+    for (eid, items) in changed_carts {
+        refresh(server, eid, &items);
+    }
 }
 
 fn dist2(a: &[f64; 3], b: &[f64; 3]) -> f64 {
@@ -647,6 +844,9 @@ fn tick_boat(world: &mut World, v: &mut Vehicle) {
 }
 
 pub fn tick(server: &Arc<Server>) {
+    if server.age.load(std::sync::atomic::Ordering::Relaxed) % 4 == 0 {
+        transfer(server);
+    }
     let riders: HashMap<i32, Arc<Player>> = server.online().into_iter().map(|p| (p.eid, p)).collect();
     let mut packets: Vec<(i32, Vec<u8>, bool)> = Vec::new();
     let mut follows: Vec<(Arc<Player>, [f64; 3], VehicleKind)> = Vec::new();
@@ -674,7 +874,7 @@ pub fn tick(server: &Arc<Server>) {
                 let driven = matches!(v.kind, VehicleKind::Boat(..)) && rider.is_some();
                 if !driven {
                     match v.kind {
-                        VehicleKind::Minecart => {
+                        VehicleKind::Minecart(_) => {
                             let yaw = rider.as_ref().map(|r| r.state.lock().unwrap().yaw);
                             tick_minecart(&mut world, v, yaw);
                         }
@@ -739,6 +939,8 @@ struct Saved {
     dim: String,
     pos: [f64; 3],
     yaw: f32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    items: Vec<crate::world::blockentity::SavedSlot>,
 }
 
 fn file(server: &Server) -> std::path::PathBuf {
@@ -746,7 +948,7 @@ fn file(server: &Server) -> std::path::PathBuf {
 }
 
 pub fn save(server: &Server) {
-    let saved: Vec<Saved> = server.vehicles.lock().unwrap().values().map(|v| Saved { item: v.kind.item(), dim: v.dim.name().into(), pos: v.pos, yaw: v.yaw }).collect();
+    let saved: Vec<Saved> = server.vehicles.lock().unwrap().values().map(|v| Saved { item: v.kind.item(), dim: v.dim.name().into(), pos: v.pos, yaw: v.yaw, items: crate::world::blockentity::save_slots(&v.items) }).collect();
     if let Err(e) = std::fs::write(file(server), serde_json::to_string(&saved).unwrap()) {
         tracing::warn!("no se pudieron guardar los vehículos: {e}");
     }
@@ -758,7 +960,10 @@ pub fn load(server: &Server) {
     for s in saved {
         let Some(kind) = VehicleKind::from_item(&s.item) else { continue };
         let dim = Dimension::ALL.into_iter().find(|d| d.name() == s.dim).unwrap_or(Dimension::Overworld);
-        spawn(server, dim, kind, s.pos, s.yaw);
+        let eid = spawn(server, dim, kind, s.pos, s.yaw);
+        if let Some(v) = server.vehicles.lock().unwrap().get_mut(&eid) {
+            v.items = crate::world::blockentity::load_slots(&s.items, kind.slots());
+        }
     }
 }
 
@@ -771,9 +976,11 @@ mod tests {
         assert_eq!(VehicleKind::from_item("oak_boat"), Some(VehicleKind::Boat(0, false)));
         assert_eq!(VehicleKind::from_item("dark_oak_chest_boat"), Some(VehicleKind::Boat(6, true)));
         assert_eq!(VehicleKind::from_item("bamboo_raft"), Some(VehicleKind::Boat(8, false)));
-        assert_eq!(VehicleKind::from_item("minecart"), Some(VehicleKind::Minecart));
+        assert_eq!(VehicleKind::from_item("minecart"), Some(VehicleKind::Minecart(Cart::Plain)));
+        assert_eq!(VehicleKind::from_item("hopper_minecart"), Some(VehicleKind::Minecart(Cart::Hopper)));
+        assert_eq!(VehicleKind::Minecart(Cart::Chest).slots(), 27);
         assert_eq!(VehicleKind::Boat(6, true).item(), "dark_oak_chest_boat");
-        for k in [VehicleKind::Boat(0, false), VehicleKind::Boat(1, true), VehicleKind::Minecart] {
+        for k in [VehicleKind::Boat(0, false), VehicleKind::Boat(1, true), VehicleKind::Minecart(Cart::Plain), VehicleKind::Minecart(Cart::Chest), VehicleKind::Minecart(Cart::Hopper)] {
             assert!(data::get().item_id(&k.item()).is_some(), "{}", k.item());
             assert!(data::get().entity(k.entity()) > 0);
         }
@@ -794,7 +1001,7 @@ mod tests {
             eid: 1,
             uuid: 1,
             dim: Dimension::Overworld,
-            kind: VehicleKind::Minecart,
+            kind: VehicleKind::Minecart(Cart::Plain),
             pos: [0.5, 65.0625, 0.5],
             vel: [0.0; 3],
             yaw: 0.0,
@@ -806,6 +1013,7 @@ mod tests {
             on_ground: false,
             sent: [0.0; 3],
             sent_yaw: 0.0,
+            items: vec![],
         };
         // Next to a solid block, the powered rail launches it.
         world.set_block(BlockPos::new(-1, 65, 0), reg.state("stone"));

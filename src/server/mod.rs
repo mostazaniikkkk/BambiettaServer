@@ -1,7 +1,13 @@
 //! Global server state and periodic tasks.
 
 pub mod admin;
+pub mod beacons;
+pub mod blockmech;
+pub mod falling;
 pub mod frames;
+pub mod decor;
+pub mod gadgets;
+pub mod household;
 pub mod gateways;
 pub mod sites;
 pub mod leads;
@@ -165,12 +171,20 @@ pub struct PlayerState {
     pub chat_times: Vec<std::time::Instant>,
     /// Bed to respawn at (head).
     pub spawn_point: Option<BlockPos>,
+    /// Where it last died (the recovery compass points there).
+    pub last_death: Option<(crate::world::Dimension, BlockPos)>,
+    /// Dimension of `spawn_point`: a bed in the Overworld or a respawn anchor in the Nether.
+    pub spawn_dim: crate::world::Dimension,
+    /// The ender chest's contents (the same in every ender chest).
+    pub ender: Vec<crate::item::Slot>,
     /// Sleeping in this bed.
     pub sleeping: Option<BlockPos>,
     /// Ticks since the player last slept (or died): phantoms come after three days.
     pub rest: i64,
     /// Parrot riding on the left shoulder (its variant).
     pub shoulder: Option<i32>,
+    /// Ticks spent freezing in powder snow.
+    pub frozen: u32,
     pub sleep_ticks: u32,
     pub portal_ticks: u32,
     pub portal_cooldown: u32,
@@ -237,8 +251,12 @@ impl PlayerState {
             xp_seed: (entities::random() * i32::MAX as f32) as i32,
             chat_times: Vec::new(),
             spawn_point: None,
+            last_death: None,
+            spawn_dim: crate::world::Dimension::Overworld,
+            ender: vec![None; 27],
             rest: 0,
             shoulder: None,
+            frozen: 0,
             sleeping: None,
             sleep_ticks: 0,
             portal_ticks: 0,
@@ -405,6 +423,7 @@ impl Server {
         mobs::save(self);
         raids::save(self);
         frames::save(self);
+        decor::save(self);
         vehicles::save(self);
         maps::save();
         // Player views before locking the world (lock order: player -> world).
@@ -519,6 +538,13 @@ impl Server {
             hoppers::tick(&self);
             fluids::tick(&self, age);
             mark("fluidos");
+            falling::tick(&self);
+            beacons::tick(&self, age);
+            gadgets::tick(&self);
+            decor::tick(&self);
+            if age % 10 == 3 {
+                blockmech::footsteps(&self);
+            }
             redstone::tick(&self, age);
             fire::tick(&self, age);
             weather::tick(&self, age);

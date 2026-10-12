@@ -272,6 +272,15 @@ fn turtle(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], actio
 
 // ---------- goats ----------
 
+/// A goat that lost a horn (metadata 18 and 19 show them).
+pub const GOAT_NO_LEFT_HORN: u32 = 1;
+pub const GOAT_NO_RIGHT_HORN: u32 = 2;
+
+/// Blocks a ramming goat breaks its horn on (`#snaps_goat_horn`).
+fn snaps_horn(name: &str) -> bool {
+    name.ends_with("_log") || name.ends_with("_wood") || matches!(name, "stone" | "packed_ice" | "iron_ore" | "coal_ore" | "copper_ore" | "emerald_ore")
+}
+
 fn goat(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], actions: &mut Vec<Action>) -> Option<([f64; 3], f64)> {
     // Ramming: every now and then it charges at someone nearby and knocks them back.
     if m.burst > 0 {
@@ -279,6 +288,28 @@ fn goat(world: &mut World, m: &mut Mob, seen: &[Seen], others: &[Other], actions
         let target = m.target.and_then(|e| seen.iter().find(|s| s.player.eid == e && s.present));
         if let Some(t) = target {
             mobs::face(m, t.pos);
+            // Charging into a log, stone, ore or packed ice snaps off one of its horns.
+            let dir = mobs::normalize([t.pos[0] - m.pos[0], 0.0, t.pos[2] - m.pos[2]]);
+            let front = BlockPos::new((m.pos[0] + dir[0] * 0.8).floor() as i32, m.pos[1].floor() as i32, (m.pos[2] + dir[2] * 0.8).floor() as i32);
+            let front_name = data::get().block_of_state(world.get_block(front)).name.as_str();
+            if snaps_horn(front_name) && mobs::dist2(&t.pos, &m.pos) > 1.6 * 1.6 {
+                actions.push(Action::Sound(m.eid, "entity.goat.ram_impact".into(), sound::NEUTRAL));
+                let left = m.flags & GOAT_NO_LEFT_HORN == 0;
+                let right = m.flags & GOAT_NO_RIGHT_HORN == 0;
+                if left || right {
+                    m.flags |= if left { GOAT_NO_LEFT_HORN } else { GOAT_NO_RIGHT_HORN };
+                    // Screaming goats carry the last four instruments.
+                    let i = (r() * 4.0) as usize + if m.variant == 1 { 4 } else { 0 };
+                    actions.push(Action::Drop(m.dim, [m.pos[0] + dir[0] * 0.5, m.pos[1] + 1.0, m.pos[2] + dir[2] * 0.5], super::gadgets::horn_spec(i)));
+                    actions.push(Action::Sound(m.eid, "entity.goat.horn_break".into(), sound::NEUTRAL));
+                    actions.push(Action::Meta(mobs::metadata(m), m.eid));
+                }
+                m.burst = 0;
+                m.target = None;
+                m.vel = [-dir[0] * 0.3, 0.2, -dir[2] * 0.3];
+                m.knockback_ticks = 6;
+                return Some((m.pos, 0.0));
+            }
             if mobs::dist2(&t.pos, &m.pos) < 1.6 * 1.6 {
                 let dir = mobs::normalize([t.pos[0] - m.pos[0], 0.0, t.pos[2] - m.pos[2]]);
                 let k = if m.variant == 1 { 3.0 } else { 2.0 };

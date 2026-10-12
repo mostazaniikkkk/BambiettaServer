@@ -53,6 +53,8 @@ pub struct Env {
     pub climbing: bool,
     /// Block that cushions falls (slime, bed, hay, cobweb...): damage multiplier.
     pub fall_factor: f64,
+    /// Landing on a stalagmite (pointed dripstone pointing up): falls hurt far more.
+    pub stalagmite: bool,
 }
 
 pub enum Verdict {
@@ -92,6 +94,7 @@ pub fn environment(world: &mut World, pos: [f64; 3], sneaking: bool, eye_height:
                 if !inside || y == lo(pos[1] - 0.01) {
                     match block.name.as_str() {
                         "slime_block" => env.fall_factor = 0.0,
+                        "pointed_dripstone" if block.get(state, "vertical_direction") == Some("up") => env.stalagmite = true,
                         "hay_block" | "honey_block" => env.fall_factor = env.fall_factor.min(0.2),
                         n if n.ends_with("_bed") => env.fall_factor = env.fall_factor.min(0.5),
                         _ => {}

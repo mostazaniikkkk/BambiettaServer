@@ -98,7 +98,8 @@ async fn join(server: &Arc<Server>, player: &Arc<Player>) -> bool {
     p.string(dim.name()).string(dim.name());
     p.i64(cfg.generation.options.seed).u8(game_mode).i8(-1);
     p.bool(false).bool(dim == crate::world::Dimension::Overworld && matches!(cfg.generation.name.as_str(), "flat" | "superflat"));
-    p.bool(false).varint(0);
+    super::gadgets::death_location(&mut p, player.state.lock().unwrap().last_death);
+    p.varint(0);
     player.send(p);
     // Only now does it join the player list: before the login packet, a broadcast (a block
     // change, a mob) would reach a client that is not in the game yet.
@@ -165,6 +166,7 @@ async fn join(server: &Arc<Server>, player: &Arc<Player>) -> bool {
     super::border::send_state(server, player);
     super::leads::send_knots(server, player);
     super::frames::send_all(player);
+    super::decor::send_all(player);
     super::advancements::send_all(player);
     server.broadcast_message(&format!("§e{} entró al juego", player.name));
     player.message("§dBienvenido a Bambietta§7 · usa §e/help");
@@ -313,7 +315,8 @@ async fn handle_packet(
         USE_ITEM => {
             let hand = r.varint()?;
             let seq = r.varint()?;
-            let used = super::fluids::use_bucket(server, player, hand)
+            let used = super::gadgets::use_item(server, player, hand)
+                || super::fluids::use_bucket(server, player, hand)
                 || super::signs::read_book(player, hand)
                 || super::maps::use_empty_map(server, player, hand)
                 || super::vehicles::use_boat(server, player, hand)
@@ -376,6 +379,7 @@ async fn handle_packet(
                 }
             }
         }
+        SET_BEACON_EFFECT => super::beacons::choose(server, player, &mut r)?,
         ENCHANT_ITEM => {
             let _window = r.i8()?;
             let button = r.i8()?;
@@ -598,6 +602,8 @@ fn window_click(server: &Arc<Server>, player: &Arc<Player>, r: &mut Reader) -> R
     }
     super::containers::after_click(server, player, smelted);
     super::horses::sync_window(server, player);
+    super::vehicles::sync_window(server, player);
+    super::household::after_click(player);
     super::stations::after_click(server, player, taken);
     super::enchanting::refresh(server, player);
     if armor_changed {
@@ -651,7 +657,10 @@ async fn moved(server: &Arc<Server>, player: &Arc<Player>, pos: Option<[f64; 3]>
                             if st.fall_distance > 0.5 {
                                 debug!("{}: aterriza tras caer {:.2} bloques (factor {})", player.name, st.fall_distance, env.fall_factor);
                             }
-                            if st.fall_distance > 3.0 {
+                            if env.stalagmite {
+                                // Vanilla: two more blocks of fall, and double damage.
+                                fall_damage = ((st.fall_distance + 2.0 - 3.0).max(0.0).ceil() * 2.0) as f32;
+                            } else if st.fall_distance > 3.0 {
                                 fall_damage = ((st.fall_distance - 3.0).ceil() * env.fall_factor) as f32;
                             }
                             landed = st.fall_distance;
@@ -961,6 +970,8 @@ pub fn metadata(player: &Player) -> Vec<u8> {
     p.u8(10).varint(1).varint(color);
     p.u8(6).varint(20).varint(if sneaking { 5 } else { 0 });
     p.u8(17).varint(0).u8(0x7f);
+    // 7: ticks frozen (powder snow).
+    p.u8(7).varint(1).varint(player.state.lock().unwrap().frozen as i32);
     // 19: what rides on the left shoulder (a parrot).
     p.u8(19).varint(16);
     super::pets::shoulder_nbt(player.state.lock().unwrap().shoulder).write_network(&mut p);

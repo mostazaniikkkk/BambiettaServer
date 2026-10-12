@@ -161,6 +161,8 @@ fn break_block(server: &Arc<Server>, player: &Player, pos: BlockPos, drops: bool
         Some(crate::world::blockentity::BlockEntity::Banner(p)) if !p.is_empty() => Some(p.clone()),
         _ => None,
     };
+    // A shulker box keeps its contents in the item it drops.
+    let shulker = super::household::take_shulker(server, dim, pos, &block.name);
     // Chests and furnaces drop their contents (also in creative, like vanilla).
     let contents = super::containers::on_break(server, dim, pos);
     super::mechanisms::broken(server, dim, pos, &block.name);
@@ -168,6 +170,8 @@ fn break_block(server: &Arc<Server>, player: &Player, pos: BlockPos, drops: bool
         super::leads::fence_broken(server, dim, pos);
     }
     super::frames::block_changed(server, dim, pos);
+    super::decor::block_changed(server, dim, pos);
+    super::blockmech::vibration(server, dim, [pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5], None);
     set(server, dim, pos, 0);
     if block.name == "obsidian" || block.name == "nether_portal" {
         super::portals::break_portal_near(server, dim, pos);
@@ -203,6 +207,10 @@ fn break_block(server: &Arc<Server>, player: &Player, pos: BlockPos, drops: bool
         }
     }
     super::fluids::neighbor_changed(server, dim, pos);
+    // (In creative only when it holds something, like vanilla.)
+    if let Some((item, _)) = shulker.clone().filter(|(_, full)| drops || *full) {
+        entities::drop_at_block(server, dim, pos.x, pos.y, pos.z, item);
+    }
     for item in contents {
         entities::drop_at_block(server, dim, pos.x, pos.y, pos.z, item);
     }
@@ -253,7 +261,7 @@ fn break_block(server: &Arc<Server>, player: &Player, pos: BlockPos, drops: bool
     for (p, s) in broken {
         let b = reg.block_of_state(s);
         // A plant that falls for lack of support always drops its loot.
-        if p == pos && !g.can_harvest(b, tool.as_ref().map(|t| t.id)) {
+        if p == pos && (!g.can_harvest(b, tool.as_ref().map(|t| t.id)) || shulker.is_some()) {
             continue;
         }
         for (item, count) in g.drops(b, s, tool.as_ref(), &mut entities::random) {
@@ -313,6 +321,9 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         if clicked.name.ends_with("_fence") && super::leads::tie(server, player, req.location) {
             return;
         }
+        if super::household::interact(server, player, req.location, clicked_state, &item, req.hand) {
+            return;
+        }
         if super::containers::open(server, player, req.location, clicked) {
             return;
         }
@@ -357,13 +368,22 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         }
         return;
     }
+    // A compass on a lodestone.
+    if stack.name() == "compass" && clicked.name == "lodestone" {
+        super::gadgets::lodestone(server, player, req.location, req.hand);
+        return;
+    }
+    // Powder snow is scooped up and poured from here (it is not a fluid).
+    if super::blockmech::powder_bucket(server, player, req.location, req.face, req.hand, stack.name()) {
+        return;
+    }
     // Buckets are used via `use_item` (like vanilla), not by placing against a block.
     if stack.name().ends_with("_bucket") {
         return;
     }
     // Minecart on a rail.
-    if stack.name() == "minecart" {
-        if !super::vehicles::place_minecart(server, player, req.location, req.hand) {
+    if matches!(stack.name(), "minecart" | "chest_minecart" | "hopper_minecart") {
+        if !super::vehicles::place_minecart(server, player, stack.name(), req.location, req.hand) {
             reject("la vagoneta va sobre un raíl");
         }
         return;
@@ -375,6 +395,11 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
             super::mobs::spawn(server, dim, super::mobs::MobKind::EndCrystal, [p.x as f64 + 0.5, p.y as f64 + 1.0, p.z as f64 + 0.5]);
             consume(player, game_mode, req.hand, &stack);
         }
+        return;
+    }
+    // Armor stands stand on top; paintings hang on walls.
+    if matches!(stack.name(), "armor_stand" | "painting") && game_mode != 2 {
+        super::decor::place(server, player, stack.name(), req.location, req.face, req.hand);
         return;
     }
     // Item frames hang on block faces.
@@ -405,7 +430,24 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
         }
     }
 
-    let target = if replaceable(clicked) { req.location } else { req.location.offset(req.face) };
+    // Scaffolding against scaffolding climbs the tower (or reaches out from its top).
+    let scaffold_spot = if block.name == "scaffolding" && clicked.name == "scaffolding" && !sneaking {
+        let look_dir = match ((yaw / 90.0 + 0.5).floor() as i32).rem_euclid(4) {
+            0 => (0, 1),
+            1 => (-1, 0),
+            2 => (0, -1),
+            _ => (1, 0),
+        };
+        let spot = super::blockmech::scaffold_target(&mut server.world(dim).lock().unwrap(), req.location, req.face, look_dir);
+        if spot.is_none() {
+            reject("no hay sitio para el andamio");
+            return;
+        }
+        spot
+    } else {
+        None
+    };
+    let target = scaffold_spot.unwrap_or(if replaceable(clicked) { req.location } else { req.location.offset(req.face) });
     if !in_world(dim, target) || !replaceable(reg.block_of_state(get(server, dim, target))) {
         reject("destino ocupado o fuera del mundo");
         return;
@@ -511,6 +553,16 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
             return;
         }
     }
+    // Scaffolding: how far it is from a support (it cannot reach out more than six).
+    if block.name == "scaffolding" {
+        match super::blockmech::scaffold_state(&mut server.world(dim).lock().unwrap(), target, state) {
+            Some(s) => state = s,
+            None => {
+                reject("el andamio no tiene apoyo");
+                return;
+            }
+        }
+    }
     // Do not place solid blocks inside a player.
     let blocked = |pos: BlockPos, state: u16| {
         let boxes: Vec<Aabb> = gameplay::get()
@@ -566,10 +618,12 @@ pub fn place(server: &Arc<Server>, player: &Arc<Player>, req: PlaceRequest) {
             server.broadcast_dim(dim, &p, None);
         }
     }
+    super::household::placed(server, dim, target, &block.name, &stack);
     if let Some((pos, s)) = second {
         set(server, dim, pos, s);
     }
     super::fluids::neighbor_changed(server, dim, target);
+    super::blockmech::vibration(server, dim, [target.x as f64 + 0.5, target.y as f64 + 0.5, target.z as f64 + 0.5], Some(player));
     consume(player, game_mode, req.hand, &stack);
     // Placing a sign opens its editor.
     if block.name.ends_with("_sign") {

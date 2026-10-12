@@ -11,6 +11,7 @@ let failed = 0
 const check = (ok, what) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${what}`); if (!ok) failed++ }
 const attempt = (opts) => new Promise(resolve => {
   const b = mineflayer.createBot({ host, port, username: 'Cracked', version: '1.20.4', auth: 'offline', ...opts })
+  b._client.on('registry_data', p => b.registry?.loadDimensionCodec?.(p.codec || p)) // mineflayer race with fast servers
   b.once('spawn', () => resolve({ ok: true, bot: b }))
   b.once('kicked', r => resolve({ ok: false, reason: typeof r === 'string' ? r : JSON.stringify(r) }))
   b.once('end', r => setTimeout(() => resolve({ ok: false, reason: `end ${r}` }), 500))

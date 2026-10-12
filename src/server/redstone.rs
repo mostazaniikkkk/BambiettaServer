@@ -157,6 +157,11 @@ impl Ctx<'_> {
             "lectern" if on("powered") => {
                 if !strong || to == off(from, (0, -1, 0)) { 15 } else { 0 }
             }
+            // Sculk sensors: their power, strong only into the block below.
+            "sculk_sensor" | "calibrated_sculk_sensor" => {
+                let p: u8 = b.get(s, "power").and_then(|v| v.parse().ok()).unwrap_or(0);
+                if !strong || to == off(from, (0, -1, 0)) { p } else { 0 }
+            }
             _ => 0,
         }
     }
@@ -322,7 +327,7 @@ impl Ctx<'_> {
         let n = b.name.as_str();
         let connects = match n {
             "redstone_wire" => true,
-            "redstone_block" | "lever" | "redstone_torch" | "redstone_wall_torch" | "target" | "daylight_detector" | "observer" => true,
+            "redstone_block" | "lever" | "redstone_torch" | "redstone_wall_torch" | "target" | "daylight_detector" | "observer" | "sculk_sensor" | "calibrated_sculk_sensor" => true,
             _ if n.ends_with("_button") || n.ends_with("_pressure_plate") => true,
             "repeater" | "comparator" => matches!(b.get(s, "facing"), Some(f) if f == dir || f == opposite(dir)),
             _ => false,
@@ -684,6 +689,13 @@ fn scheduled_tick(server: &Arc<Server>, dim: Dimension, pos: BlockPos) {
                 ready = next.is_some();
                 next
             }
+            "sculk_sensor" | "calibrated_sculk_sensor" => match super::blockmech::sensor_tick(s) {
+                Some((next, later)) => {
+                    again = later;
+                    Some(next)
+                }
+                None => None,
+            },
             _ => None,
         }
     };
@@ -868,6 +880,67 @@ pub fn tnt_spawn_packets(server: &Server, eids: &[i32]) -> HashMap<i32, Vec<Vec<
 // ---------- pistons ----------
 
 /// Extends or retracts a piston. Returns the positions that changed.
+/// Blocks a piston moves when pushing (or pulling) from `start` in direction `d`: the line
+/// in front, plus everything stuck to slime and honey blocks (which do not stick to each
+/// other), up to 12. `None` if something immovable is in the way or it is too many.
+fn piston_structure(world: &mut World, start: BlockPos, d: (i32, i32, i32), piston: BlockPos, pulling: bool) -> Option<Vec<BlockPos>> {
+    let reg = data::get();
+    let classify = |w: &mut World, p: BlockPos| -> Option<bool> {
+        if p == piston {
+            return None;
+        }
+        let st = w.get_block(p);
+        let bl = reg.block_of_state(st);
+        if reg.is_air(st) || matches!(bl.name.as_str(), "water" | "lava" | "short_grass" | "tall_grass" | "fern" | "snow" | "fire" | "torch" | "dead_bush") || bl.hardness == 0.0 && gameplay::get().shape(st).is_empty() {
+            return Some(false); // free space (it breaks)
+        }
+        let has_be = crate::world::blockentity::type_id(&bl.name).is_some();
+        if IMMOVABLE.contains(&bl.name.as_str()) || bl.hardness < 0.0 || has_be || ((bl.name == "piston" || bl.name == "sticky_piston") && bl.get(st, "extended") == Some("true")) {
+            return None;
+        }
+        Some(true)
+    };
+    let sticky = |n: &str| n == "slime_block" || n == "honey_block";
+    let name = |w: &mut World, p: BlockPos| reg.block_of_state(w.get_block(p)).name.clone();
+    let mut list: Vec<BlockPos> = Vec::new();
+    let mut queue = std::collections::VecDeque::from([start]);
+    while let Some(p) = queue.pop_front() {
+        if list.contains(&p) {
+            continue;
+        }
+        match classify(world, p) {
+            // Pulling does not drag what cannot move; pushing is blocked by it.
+            None if pulling && p != start => continue,
+            None => return None,
+            Some(false) => continue,
+            Some(true) => {}
+        }
+        list.push(p);
+        if list.len() > 12 {
+            return None;
+        }
+        // What is in front gets pushed along.
+        queue.push_back(off(p, d));
+        // Slime and honey drag their neighbours.
+        let here = name(world, p);
+        if sticky(&here) {
+            for dd in DIRS {
+                let q = off(p, (dd.1, dd.2, dd.3));
+                if q == piston || (dd.1, dd.2, dd.3) == d {
+                    continue;
+                }
+                let there = name(world, q);
+                let glazed = there.ends_with("_glazed_terracotta");
+                let mismatch = sticky(&there) && there != here;
+                if !glazed && !mismatch && classify(world, q) == Some(true) {
+                    queue.push_back(q);
+                }
+            }
+        }
+    }
+    Some(list)
+}
+
 fn move_piston(server: &Arc<Server>, dim: Dimension, pos: BlockPos, extend: bool) -> Vec<BlockPos> {
     let reg = data::get();
     let mut changes: Vec<(BlockPos, u16)> = Vec::new();
@@ -880,43 +953,30 @@ fn move_piston(server: &Arc<Server>, dim: Dimension, pos: BlockPos, extend: bool
         let sticky = b.name == "sticky_piston";
         let head = reg.block("piston_head").unwrap();
         let head_state = head.with(head.with(head.default_state, "facing", &facing), "type", if sticky { "sticky" } else { "normal" });
-        let movable = |w: &mut World, p: BlockPos| -> Option<bool> {
-            let st = w.get_block(p);
-            let bl = reg.block_of_state(st);
-            if reg.is_air(st) || matches!(bl.name.as_str(), "water" | "lava" | "short_grass" | "tall_grass" | "fern" | "snow" | "fire" | "torch" | "dead_bush") || bl.hardness == 0.0 && gameplay::get().shape(st).is_empty() {
-                return Some(false); // free space (it breaks)
+        // Moves `list` one step in `dir`: new places first, then what is left empty.
+        let shift = |world: &mut World, list: &[BlockPos], dir: (i32, i32, i32), changes: &mut Vec<(BlockPos, u16)>| {
+            let states: Vec<u16> = list.iter().map(|&p| world.get_block(p)).collect();
+            let targets: Vec<BlockPos> = list.iter().map(|&p| off(p, dir)).collect();
+            for (&p, _) in list.iter().zip(&states) {
+                if !targets.contains(&p) {
+                    changes.push((p, 0));
+                }
             }
-            let has_be = crate::world::blockentity::type_id(&bl.name).is_some();
-            if IMMOVABLE.contains(&bl.name.as_str()) || bl.hardness < 0.0 || has_be || ((bl.name == "piston" || bl.name == "sticky_piston") && bl.get(st, "extended") == Some("true")) {
-                return None;
+            for (t, st) in targets.into_iter().zip(states) {
+                changes.push((t, st));
             }
-            Some(true)
         };
         if extend {
-            // Blocks to push (12 max).
-            let mut line = Vec::new();
-            let mut p = off(pos, d);
-            loop {
-                if !dim.in_bounds(p.y) {
-                    return vec![];
-                }
-                match movable(&mut world, p) {
-                    None => return vec![],
-                    Some(false) => break,
-                    Some(true) => {
-                        line.push(p);
-                        if line.len() > 12 {
-                            return vec![];
-                        }
-                        p = off(p, d);
-                    }
-                }
+            let front = off(pos, d);
+            if !dim.in_bounds(front.y) {
+                return vec![];
             }
-            for &q in line.iter().rev() {
-                let st = world.get_block(q);
-                changes.push((off(q, d), st));
+            let Some(list) = piston_structure(&mut world, front, d, pos, false) else { return vec![] };
+            if list.iter().any(|p| !dim.in_bounds(off(*p, d).y)) {
+                return vec![];
             }
-            changes.push((off(pos, d), head_state));
+            shift(&mut world, &list, d, &mut changes);
+            changes.push((front, head_state));
             changes.push((pos, b.with(s, "extended", "true")));
         } else {
             let front = off(pos, d);
@@ -924,11 +984,11 @@ fn move_piston(server: &Arc<Server>, dim: Dimension, pos: BlockPos, extend: bool
                 changes.push((front, 0));
             }
             if sticky {
-                let pulled = off(front, d);
-                if movable(&mut world, pulled) == Some(true) {
-                    let st = world.get_block(pulled);
-                    changes.push((front, st));
-                    changes.push((pulled, 0));
+                // The head comes off first, so the pulled blocks have room.
+                world.set_block(front, 0);
+                let back = (-d.0, -d.1, -d.2);
+                if let Some(list) = piston_structure(&mut world, off(front, d), back, pos, true) {
+                    shift(&mut world, &list, back, &mut changes);
                 }
             }
             changes.push((pos, b.with(s, "extended", "false")));
@@ -937,12 +997,17 @@ fn move_piston(server: &Arc<Server>, dim: Dimension, pos: BlockPos, extend: bool
             world.set_block(p, st);
         }
     }
+    // Later changes win (a block moved into a freed spot).
+    let mut seen = std::collections::HashMap::new();
     for &(p, st) in &changes {
+        seen.insert(p, st);
+    }
+    for (&p, &st) in &seen {
         server.broadcast_dim(dim, &super::blocks::block_change(p, st), None);
     }
     let sound = if extend { "block.piston.extend" } else { "block.piston.contract" };
     super::sound::at(server, dim, [pos.x as f64 + 0.5, pos.y as f64 + 0.5, pos.z as f64 + 0.5], sound, super::sound::BLOCK, 0.5, 0.7);
-    changes.into_iter().map(|c| c.0).collect()
+    seen.into_keys().collect()
 }
 
 /// Flint and steel on TNT: it ignites.
